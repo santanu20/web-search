@@ -473,6 +473,8 @@ uv run python $SCRIPT pro "kubernetes pod security" --use-llm \
 | Var | Default | Purpose |
 |-----|---------|---------|
 | `WEB_SEARCH_LLM_MODEL` | `qwen3.5:9b` | generation model (override freely) |
+| `WEB_SEARCH_LLM_LIGHT_MODEL` | *(empty = auto-pick)* | small model for routing stages (query refine, rerank, decompose, gap queries); empty = smallest non-embed/vision/ocr/clip model on `/api/tags`, fallback = main model; choice always logged |
+| `WEB_SEARCH_EVIDENCE_MODE` | `passage` | `passage` = query-relevant evidence windows for synthesis + quote grounding; `head` = legacy `[:4000]` head-truncation (A/B kill-switch) |
 | `WEB_SEARCH_EMBED_MODEL` | `nomic-embed-text` | embedding model for `--semantic-coverage` |
 | `WEB_SEARCH_LLM_PROVIDER` | `auto` | `auto` (probe the host) \| `ollama` \| `openai` — pin to skip probing |
 | `WEB_SEARCH_LLM_HOST` | `http://localhost:11434` | LLM REST base (localhost only — §7g data-egress guard). Host ending in `/v1` → OpenAI-compatible; else probed (`/api/tags` → ollama, `/v1/models` → openai) |
@@ -657,7 +659,7 @@ PDFs like `https://arxiv.org/pdf/2401.00001`). Agent flow on signal:
 
 ```bash
 curl -sL -o /tmp/doc.pdf "<url>"          # download
-uv run python ~/.omp/agent/skills/pdf-ocr/scripts/pdf_ocr.py \
+uv run python ~/.config/opencode/skills/pdf-ocr/scripts/pdf_ocr.py \
     /tmp/doc.pdf /tmp/doc.md               # extract via pdf-ocr skill
 ```
 
@@ -755,7 +757,7 @@ uv run python $SCRIPT extract https://rbi.org.in/circulars/2024/notification.pdf
 
 # Step 2 (agent): download + route to pdf-ocr skill
 curl -sL -o /tmp/circular.pdf "https://rbi.org.in/circulars/2024/notification.pdf"
-uv run python ~/.omp/agent/skills/pdf-ocr/scripts/pdf_ocr.py /tmp/circular.pdf /tmp/circular.md
+uv run python ~/.config/opencode/skills/pdf-ocr/scripts/pdf_ocr.py /tmp/circular.pdf /tmp/circular.md
 
 # Same flow when PDFs surface inside crawl results — they appear in
 # payload.binary_urls[] for batch handling.
@@ -908,6 +910,8 @@ sequence ≈ 1.5s → 3s → 6s → 12s → 24s (+30% jitter), max 30s.
 | Var | Default | Purpose |
 |-----|---------|---------|
 | `WEB_SEARCH_LLM_MODEL` | `qwen3.5:9b` | generation model — no hardcoded model, override freely |
+| `WEB_SEARCH_LLM_LIGHT_MODEL` | *(empty = auto-pick)* | small model for routing stages (query refine, rerank, decompose, gap queries); empty = smallest non-embed/vision/ocr/clip model on `/api/tags`, fallback = main model; choice always logged (`llm_light_model_routed`) |
+| `WEB_SEARCH_EVIDENCE_MODE` | `passage` | `passage` = query-relevant evidence windows for synthesis + quote grounding; `head` = legacy `[:4000]` head-truncation (A/B kill-switch) |
 | `WEB_SEARCH_LLM_PROVIDER` | `auto` | `auto` \| `ollama` \| `openai` — pin provider, skip probing |
 | `WEB_SEARCH_LLM_HOST` | `http://localhost:11434` | LLM REST base, any provider (localhost only — §7g egress guard); `/v1` suffix → OpenAI-compatible |
 | `WEB_SEARCH_OLLAMA_HOST` | *(legacy alias)* | backward-compat alias for `WEB_SEARCH_LLM_HOST` |
@@ -1033,9 +1037,6 @@ Wait for user decision before proceeding.
 This skill is standalone and location-independent: `web_search.py`
 derives its venv from its own directory (`__file__`-relative) and caches
 under `$HOME/.cache/web-search` — move the folder anywhere and it works.
-Keep exactly ONE copy. The former mirror at
-`~/.config/opencode/skills/web-search/` was a duplicated directory that
-drifted silently and was removed 2026-08-21; do not re-create a copy.
-The only sanctioned cross-runtime entry is a SYMLINK
-(`~/.config/opencode/skills/web-search` → this directory), which cannot
-drift because it has no content of its own.
+Keep exactly ONE copy. The canonical copy lives at
+`~/.config/opencode/skills/web-search/` (this directory; the tree was
+relocated here 2026-09 — the former `~/.omp` home no longer exists).
