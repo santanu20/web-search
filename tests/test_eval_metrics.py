@@ -4,6 +4,7 @@ is a live-run reporter; these pin the scoring functions it uses)."""
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -78,3 +79,76 @@ def test_unit__verdict__below_threshold_fails() -> None:
     rows = [{"ok": False, "grounded_rate": 0.2, "term_coverage": 0.0, "latency_s": 1.0}]
     v = eval_answers.verdict(rows, min_success=0.75, min_grounded=0.5)
     assert v["passed"] is False
+
+
+def test_unit__verdict__std_aggregates() -> None:
+    rows = [
+        {"ok": True, "grounded_rate": 0.8, "term_coverage": 1.0, "latency_s": 10.0},
+        {"ok": True, "grounded_rate": 0.6, "term_coverage": 1.0, "latency_s": 20.0},
+        {"ok": True, "grounded_rate": 1.0, "term_coverage": 1.0, "latency_s": 30.0},
+    ]
+    v = eval_answers.verdict(rows, min_success=1.0, min_grounded=0.5)
+    assert v["latency_s_std"] == 8.2  # pstdev([10,20,30]) = 8.1650
+    assert v["grounded_rate_std"] == 0.16  # pstdev([0.8,0.6,1.0]) = 0.16330
+
+
+def test_unit__seeds_loop__repeats_question_set(monkeypatch, capsys) -> None:
+    calls: list[str] = []
+
+    def fake_run_once(question, args):
+        calls.append(question)
+        return (
+            {
+                "synthesis": "africa genetic fossil",
+                "citation_grounding": [{"grounded": True}],
+                "n_sources": 5,
+                "mode": "llm",
+            },
+            1.0,
+            "",
+        )
+
+    monkeypatch.setattr(eval_answers, "run_once", fake_run_once)
+    rc = eval_answers.main(["--only", "1", "--seeds", "2", "--no-bench", "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert len(calls) == 2  # 2 seeds x 1 question
+    assert [r["seed"] for r in out["results"]] == [1, 2]
+    assert out["summary"]["passed"] is True
+
+
+def test_unit__bench_append__writes_jsonl_with_run_metadata(
+    monkeypatch, capsys, tmp_path
+) -> None:
+    bench = tmp_path / "nested" / "bench.jsonl"
+
+    def fake_run_once(question, args):
+        return (
+            {
+                "synthesis": "o-ring temperature launch",
+                "citation_grounding": [{"grounded": True}],
+                "n_sources": 7,
+                "mode": "llm",
+            },
+            2.5,
+            "",
+        )
+
+    monkeypatch.setattr(eval_answers, "run_once", fake_run_once)
+    monkeypatch.setenv("WEB_SEARCH_EVIDENCE_MODE", "head")
+    rc = eval_answers.main(
+        ["--only", "2", "--no-retry", "--bench-file", str(bench), "--json"]
+    )
+    assert rc == 0
+    capsys.readouterr()
+    lines = bench.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    rec = json.loads(lines[0])
+    assert rec["seed"] == 1
+    assert rec["mode"] == "pro"
+    assert rec["evidence_mode"] == "head"
+    assert rec["latency_s"] == 2.5
+    assert rec["ok"] is True
+    assert rec["grounded_rate"] == 1.0
+    assert rec["n_sources"] == 7
+    assert "ts" in rec

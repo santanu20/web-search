@@ -9,6 +9,12 @@ pytest (no test_ functions) — invoke directly:
     .venv/bin/python tests/eval_answers.py
     .venv/bin/python tests/eval_answers.py --mode text --no-llm
     .venv/bin/python tests/eval_answers.py --min-grounded 0.6
+    .venv/bin/python tests/eval_answers.py --seeds 3   # repeat for stable means
+
+Bench log: every question-run appends one JSON line to
+bench/eval_latency.jsonl (ts, mode, model, think, evidence mode, latency,
+grounded_rate, term_coverage, ok). Commit snapshots manually when you want
+a longitudinal record. Disable with --no-bench.
 
 Retry policy: every question gets ONE automatic retry on process failure
 (non-zero exit / invalid JSON / timeout) — live metasearch backends are
@@ -33,13 +39,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import statistics
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CLI = REPO_ROOT / "web_search.py"
+DEFAULT_BENCH_FILE = REPO_ROOT / "bench" / "eval_latency.jsonl"
 
 # Golden questions: stable facts, signal terms chosen for lexical presence.
 GOLDEN_QUESTIONS: list[dict[str, object]] = [
@@ -143,6 +153,17 @@ def evaluate_question(item: dict[str, object], args: argparse.Namespace) -> dict
     return row
 
 
+def _bench_append(record: dict, bench_file: Path) -> None:
+    """Append one run record to the bench JSONL. Never raises (harness must
+    not die on a bench-write failure — logged to stderr instead)."""
+    try:
+        bench_file.parent.mkdir(parents=True, exist_ok=True)
+        with bench_file.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, default=str) + "\n")
+    except OSError as e:
+        print(f"[eval] bench write failed: {e}", file=sys.stderr)
+
+
 def verdict(rows: list[dict], min_success: float, min_grounded: float) -> dict:
     n = len(rows) or 1
     success_rate = sum(1 for r in rows if r.get("ok")) / n
@@ -155,14 +176,18 @@ def verdict(rows: list[dict], min_success: float, min_grounded: float) -> dict:
     lats = [
         r["latency_s"] for r in rows if isinstance(r.get("latency_s"), (int, float))
     ]
+    lat_std = round(statistics.pstdev(lats), 1) if len(lats) > 1 else 0.0
+    gr_std = round(statistics.pstdev(grs), 2) if len(grs) > 1 else 0.0
     passed = success_rate >= min_success and (
         agg_grounded is None or agg_grounded >= min_grounded
     )
     return {
         "success_rate": round(success_rate, 2),
         "grounded_rate_agg": None if agg_grounded is None else round(agg_grounded, 2),
+        "grounded_rate_std": gr_std,
         "term_coverage_agg": round(agg_cov, 2),
         "latency_s_mean": round(sum(lats) / len(lats), 1) if lats else None,
+        "latency_s_std": lat_std,
         "thresholds": {"min_success": min_success, "min_grounded": min_grounded},
         "passed": passed,
     }
@@ -194,6 +219,22 @@ def main(argv: list[str] | None = None) -> int:
         help="run only golden question N (1-based) for quick manual checks",
     )
     p.add_argument(
+        "--seeds",
+        type=int,
+        default=1,
+        metavar="N",
+        help="repeat the whole question set N times (stable means/std)",
+    )
+    p.add_argument(
+        "--bench-file",
+        type=Path,
+        default=DEFAULT_BENCH_FILE,
+        help=f"latency bench JSONL (default: {DEFAULT_BENCH_FILE.relative_to(REPO_ROOT)})",
+    )
+    p.add_argument(
+        "--no-bench", action="store_true", help="do not append to the bench JSONL"
+    )
+    p.add_argument(
         "--json", action="store_true", help="stdout: JSON only (tables -> stderr)"
     )
     args = p.parse_args(argv)
@@ -202,7 +243,34 @@ def main(argv: list[str] | None = None) -> int:
     if args.only is not None:
         questions = [GOLDEN_QUESTIONS[args.only - 1]]
 
-    rows = [evaluate_question(item, args) for item in questions]
+    rows: list[dict] = []
+    for seed in range(1, max(args.seeds, 1) + 1):
+        for item in questions:
+            row = evaluate_question(item, args)
+            row["seed"] = seed
+            rows.append(row)
+            if not args.no_bench:
+                _bench_append(
+                    {
+                        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                        "seed": seed,
+                        "q": row["q"],
+                        "mode": args.mode,
+                        "model": args.model,
+                        "think": args.think,
+                        "max_rounds": args.max_rounds,
+                        "evidence_mode": os.environ.get(
+                            "WEB_SEARCH_EVIDENCE_MODE", "passage"
+                        ),
+                        "latency_s": row.get("latency_s"),
+                        "ok": row.get("ok", False),
+                        "grounded_rate": row.get("grounded_rate"),
+                        "term_coverage": row.get("term_coverage"),
+                        "n_sources": row.get("n_sources"),
+                        "error": row.get("error"),
+                    },
+                    args.bench_file,
+                )
     summary = verdict(rows, args.min_success, args.min_grounded)
     report = {"mode": args.mode, "n": len(rows), "results": rows, "summary": summary}
 
