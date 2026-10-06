@@ -497,6 +497,7 @@ class LlmSettings:
     timeout: float  # per-request timeout s (WEB_SEARCH_LLM_TIMEOUT)
     think_default: bool  # enable chain-of-thought by default (WEB_SEARCH_LLM_THINK)
     provider: str = "auto"  # auto | ollama | openai (WEB_SEARCH_LLM_PROVIDER)
+    light_model: str = ""  # small model for routing stages (WEB_SEARCH_LLM_LIGHT_MODEL; empty = auto-pick)
 
 
 # WS8: rate/politeness presets. WEB_SEARCH_PROFILE selects the DEFAULT for
@@ -671,6 +672,7 @@ class Settings:
                 timeout=_env_float("WEB_SEARCH_LLM_TIMEOUT", 120.0),
                 think_default=_env_bool("WEB_SEARCH_LLM_THINK", True),
                 provider=_env("WEB_SEARCH_LLM_PROVIDER", "auto").lower(),
+                light_model=_env("WEB_SEARCH_LLM_LIGHT_MODEL", ""),
             ),
             call_budget=_env_float("WEB_SEARCH_CALL_BUDGET", 600.0),
             concurrency=_env_int("WEB_SEARCH_CONCURRENCY", 3),
@@ -5936,7 +5938,7 @@ def _refine_query_llm(
         f"Original query: {query}\n\nTitles already found:\n{seen}\n\n"
         "Alternative query:"
     )
-    raw = _llm_call(prompt, model=model, system=system, think=False)
+    raw = _llm_call(prompt, model=model, system=system, think=False, light=True)
     line = raw.strip().splitlines()[0].strip() if raw.strip() else ""
     # LLMs love wrapping the query in quotes — sometimes with trailing
     # commentary after the close quote. Take the quoted span when present.
@@ -5976,7 +5978,7 @@ def _rerank_results_llm(
     )
     prompt = f"Query: {query}\n\nResults:\n{listing}\n\nScores:"
     try:
-        raw = _llm_call(prompt, model=model, system=system, think=False)
+        raw = _llm_call(prompt, model=model, system=system, think=False, light=True)
     except OllamaUnavailable as ex:
         log.warning("llm_rerank_failed", error=str(ex)[:80])
         return results, 0
@@ -6849,6 +6851,45 @@ def _openai_call(
         raise OllamaUnavailable(f"Malformed chat.completions response: {ex}") from ex
 
 
+_LIGHT_MODEL_CACHE: dict[str, str] = {}
+
+
+def _pick_light_model(host: str) -> str:
+    """Smallest suitable chat model on the Ollama host for routing stages
+    (query refine/decompose/gap/rerank). Excludes embedding/vision/OCR/clip
+    models by name; falls back to the main model (ALWAYS logged — §6i).
+    Cached per host for the session."""
+    cached = _LIGHT_MODEL_CACHE.get(host)
+    if cached:
+        return cached
+    cfg = _settings.llm
+    chosen, why = cfg.model, "fallback-main"
+    try:
+        with urllib_request.urlopen(
+            urllib_request.Request(f"{host.rstrip('/')}/api/tags"), timeout=5
+        ) as resp:
+            tags = json.loads(resp.read().decode("utf-8"))
+        banned = ("embed", "vision", "ocr", "clip")
+        chat_models = [
+            m
+            for m in tags.get("models", [])
+            if not any(b in (m.get("name") or "").lower() for b in banned)
+        ]
+        if chat_models:
+            smallest = min(chat_models, key=lambda m: m.get("size") or 0)
+            chosen, why = smallest.get("name"), f"smallest-of-{len(chat_models)}"
+    except (
+        urllib_error.URLError,
+        TimeoutError,
+        json.JSONDecodeError,
+        ValueError,
+    ) as ex:
+        log.warning("llm_light_model_probe_failed", host=host, error=str(ex))
+    _LIGHT_MODEL_CACHE[host] = chosen
+    log.info("llm_light_model_routed", model=chosen, reason=why, host=host)
+    return chosen
+
+
 def _llm_call(
     prompt: str,
     *,
@@ -6860,15 +6901,22 @@ def _llm_call(
     think: bool = False,
     stream: bool = False,
     num_ctx: int | None = None,
+    light: bool = False,
 ) -> str:
     """Provider-agnostic generation entry (all research call sites use this).
 
     Dispatch: probe once → native Ollama API or OpenAI-compatible server.
     Raises OllamaUnavailable when no runtime answers — callers already map
     that to the fail-fast contract (§5 H1).
-    """
+
+    light=True routes routing-class work (refine/decompose/gap/rerank) to
+    the small model: explicit `model` still wins, else WEB_SEARCH_LLM_LIGHT_MODEL,
+    else auto-pick (smallest non-embed/vision model on the host). Synthesis
+    and other heavy stages stay on the main model (P0-3)."""
     cfg = _settings.llm
     host = host or cfg.ollama_host
+    if light and model is None:
+        model = cfg.light_model or _pick_light_model(host)
     _llm_egress_guard(host)
     provider = _llm_probe(host=host)
     if provider == "openai":
@@ -6992,6 +7040,10 @@ def _ollama_call(
         "prompt": prompt,
         "stream": stream,
         "think": think,
+        # keep the model resident between pro rounds — avoids a cold reload
+        # (~10-40s on CPU) before every light routing call (P0-3; mirrors
+        # the scientific-research _llm_extract precedent).
+        "keep_alive": "30m",
     }
     if system:
         body["system"] = system
@@ -7341,7 +7393,7 @@ def _decompose_query_llm(
         "Output ONLY the sub-questions, one per line. No numbering, no preamble."
     )
     prompt = f"Research question: {query}\n\nSub-questions:"
-    raw = _llm_call(prompt, model=model, system=system, think=think)
+    raw = _llm_call(prompt, model=model, system=system, think=think, light=True)
     subs = _filter_llm_lines(raw, min_len=10, max_items=6)
     if not subs:
         log.warning("llm_decompose_empty", query=query[:60])
@@ -7419,7 +7471,7 @@ def _generate_gap_queries_llm(
         f"Not yet covered: {', '.join(uncovered[:10]) or '(none)'}\n\n"
         f"Gap-filling search queries:"
     )
-    raw = _llm_call(prompt, model=model, system=system, think=think)
+    raw = _llm_call(prompt, model=model, system=system, think=think, light=True)
     return _filter_llm_lines(raw, min_len=5, max_items=4)
 
 
