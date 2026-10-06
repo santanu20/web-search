@@ -6374,6 +6374,63 @@ def _extract_key_passage(
     return _strip_md_syntax(best_passage), round(best_relevance, 2)
 
 
+def _evidence_window(content: str, query_terms: set[str], window: int = 4000) -> str:
+    """Best query-relevant window of content for LLM evidence (P0-2).
+
+    Replaces blind head-truncation in _synthesize_llm: the model used to see
+    only content[:4000], so a key passage deep in a long page could never be
+    quoted by the model or verified by the grounding gate. Anchors on the
+    best-scoring paragraph (same overlap*2 + density*10 formula as
+    _extract_key_passage — kept duplicated, not shared: that helper is
+    pinned by its own tests and must not gain callers-coupled churn), then
+    grows the window contiguously toward the higher-scoring neighbor until
+    the char budget fills. Fallbacks: no query overlap anywhere -> head
+    window (never empty evidence); WEB_SEARCH_EVIDENCE_MODE=head restores
+    legacy head-truncation for A/B comparison.
+    """
+    if not content:
+        return ""
+    if os.getenv("WEB_SEARCH_EVIDENCE_MODE", "passage").strip().lower() == "head":
+        return content[:window]
+    paragraphs = [p.strip() for p in content.split("\n\n") if len(p.strip()) > 50]
+    if not paragraphs:
+        paragraphs = [p.strip() for p in content.split("\n") if len(p.strip()) > 50]
+    if not paragraphs:
+        return content[:window]
+
+    def _score(para: str) -> float:
+        if _is_stats_methods_noise(para, query_terms):
+            return -1.0
+        tokens = set(
+            t.strip(".,;:!?()[]\"'`/—–-").lower()
+            for t in para.split()
+            if len(t.strip(".,;:!?()[]\"'`/—–-")) > 1
+        )
+        overlap = len(query_terms & tokens)
+        if overlap == 0:
+            return -1.0
+        return overlap * 2.0 + (overlap / max(len(tokens), 1)) * 10.0
+
+    scores = [_score(p) for p in paragraphs]
+    anchor = max(range(len(paragraphs)), key=lambda i: scores[i])
+    if scores[anchor] < 0:
+        return content[:window]
+    lo = hi = anchor
+    used = len(paragraphs[anchor])
+    while used < window:
+        grow_left = lo > 0 and scores[lo - 1] >= 0
+        grow_right = hi < len(paragraphs) - 1 and scores[hi + 1] >= 0
+        if not grow_left and not grow_right:
+            break  # both borders are off-topic noise — stop, don't pad budget
+        if grow_left and (not grow_right or scores[lo - 1] >= scores[hi + 1]):
+            lo -= 1
+            used += len(paragraphs[lo]) + 2
+        else:
+            hi += 1
+            used += len(paragraphs[hi]) + 2
+    return "\n\n".join(paragraphs[lo : hi + 1])[:window]
+
+
 def _compute_confidence(
     extracted: list[dict[str, Any]],
     total_results: int,
@@ -7446,6 +7503,7 @@ def _verify_quote_grounding(
     sources: list[dict[str, Any]],
     extracted: list[dict[str, Any]],
     ratio_floor: float = 0.65,
+    query: str = "",
 ) -> tuple[list[dict[str, Any]], str]:
     """Quote-grounding gate (anti-hallucination §5 H7): every quote the LLM
     claims came from source n must fuzzy-exist in that source's extracted
@@ -7455,10 +7513,17 @@ def _verify_quote_grounding(
     (agent decides what to trust); this verifies, it does not censor.
     Quotes are capped at 40 words in the prompt; comparison is
     whitespace/lowercase-normalized (markdown rendering drift tolerated).
+
+    Scan contract (P0-2): exact substring is checked against the FULL
+    content; the fuzzy window scan uses the SAME evidence window the model
+    saw (_evidence_window with the query's terms, head window when query
+    is unknown), so verification cost stays bounded and passage-mode quotes
+    are never falsely flagged.
     """
     m = re.search(r"SOURCES:\s*\n(.*)\Z", synthesis_raw, re.DOTALL)
     if not m:
         return [], synthesis_raw
+    query_terms = {t.lower() for t in query.split() if len(t) > 2}
     records: list[dict[str, Any]] = []
     for line in m.group(1).splitlines():
         lm = re.match(r"^\s*(\d{1,2})\.\s*[\"'\u201c](.+?)[\"'\u201d]\s*$", line)
@@ -7466,22 +7531,31 @@ def _verify_quote_grounding(
             continue
         idx = int(lm.group(1))
         quote = lm.group(2)
-        content = ""
+        content_full = ""
+        scan = ""
         if 1 <= idx <= len(sources):
             s_url = sources[idx - 1].get("url") or sources[idx - 1].get("href")
             for e in extracted:
                 if (e.get("url") or e.get("href")) == s_url:
-                    content = str(e.get("content") or "")[:4000]
+                    content_full = str(e.get("content") or "")
+                    if query_terms:
+                        scan = _evidence_window(content_full, query_terms)
+                    else:
+                        scan = content_full[:4000]
                     break
-        ratio = (
-            _quote_in_content(
-                _normalize_quote_text(quote),
-                _normalize_quote_text(content),
-                ratio_floor,
+        quote_n = _normalize_quote_text(quote)
+        if quote_n and quote_n in _normalize_quote_text(content_full):
+            ratio = 1.0
+        else:
+            ratio = (
+                _quote_in_content(
+                    quote_n,
+                    _normalize_quote_text(scan),
+                    ratio_floor,
+                )
+                if content_full
+                else 0.0
             )
-            if content
-            else 0.0
-        )
         records.append(
             {
                 "index": idx,
@@ -7519,12 +7593,13 @@ def _synthesize_llm(
     (~25K tokens). num_ctx=32768 ensures Ollama doesn't truncate (default
     num_ctx=4096 would lose most evidence)."""
     src_for_llm = sources[:20]
+    query_terms = {t.lower() for t in query.split() if len(t) > 2}
     evidence_lines = []
     for i, s in enumerate(src_for_llm):
         content = ""
         for e in extracted:
             if (e.get("url") or e.get("href")) == (s.get("url") or s.get("href")):
-                content = str(e.get("content") or "")[:4000]
+                content = _evidence_window(str(e.get("content") or ""), query_terms)
                 break
         if content:
             evidence_lines.append(
@@ -7575,7 +7650,9 @@ def _synthesize_llm(
             unverified_indices=[c + 1 for c in unverified],
             note="LLM cited source numbers beyond the provided set",
         )
-    grounding, clean_raw = _verify_quote_grounding(raw, src_for_llm, extracted)
+    grounding, clean_raw = _verify_quote_grounding(
+        raw, src_for_llm, extracted, query=query
+    )
     return f"# {query}\n\n{clean_raw}", verified, grounding
 
 
