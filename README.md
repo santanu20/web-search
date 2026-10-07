@@ -1,5 +1,7 @@
 # web-search
 
+[![CI](https://github.com/santanu20/web-search/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/santanu20/web-search/actions/workflows/ci.yml)
+
 Metasearch CLI for research-grade web Q&A: 8+ search backends (DuckDuckGo, Brave,
 Google, Yandex, Yahoo, Wikipedia, Mojeek, Startpage) behind one interface, with
 bot-block bypass, full-page extraction, and optional local-LLM synthesis
