@@ -7514,6 +7514,34 @@ def _synthesize_heuristic(
     return "\n".join(lines)
 
 
+def _guard_pro_synthesis(
+    synthesis: str,
+    query: str,
+    key_findings: list[dict[str, Any]],
+    sources: list[dict[str, Any]],
+    coverage: dict[str, list[str]],
+    use_llm: bool,
+) -> tuple[str, str | None]:
+    """Reject title-only syntheses when key findings exist (2026-10-07).
+
+    Thinking-native models can burn the whole token budget on reasoning and
+    emit no answer — that shipped a 75-char title-only "synthesis" with
+    confidence 0.9. Fall back to the structured heuristic synthesis and
+    mark it in the payload instead.
+    """
+    body = synthesis.split("\n", 1)[1] if "\n" in synthesis else ""
+    if len(body.strip()) >= 40 or not key_findings:
+        return synthesis, None
+    fallback = "heuristic_empty_llm" if use_llm else "heuristic_empty"
+    log.warning(
+        "pro_synthesis_fallback",
+        reason=fallback,
+        body_chars=len(body.strip()),
+        key_findings=len(key_findings),
+    )
+    return _synthesize_heuristic(query, key_findings, sources, coverage), fallback
+
+
 def _normalize_quote_text(s: str) -> str:
     """Collapse whitespace + lowercase — quote/source comparison form."""
     return re.sub(r"\s+", " ", s).strip().lower()
@@ -7676,23 +7704,47 @@ def _synthesize_llm(
     )
     if stream:
         log.info("llm_synthesis_streaming_start", sources=len(src_for_llm))
+    syn_timeout = 300.0 if think else _settings.llm.timeout
+
+    def _call_and_verify(
+        num_predict: int,
+    ) -> tuple[str, list[int], list[dict[str, Any]]]:
+        raw = _llm_call(
+            prompt,
+            model=model,
+            system=system,
+            think=think,
+            stream=stream,
+            num_ctx=32768,
+            max_tokens=num_predict,
+            timeout=syn_timeout,
+        )
+        grounding_r, clean_r = _verify_quote_grounding(
+            raw, src_for_llm, extracted, query=query
+        )
+        cited_r = sorted({int(m) - 1 for m in re.findall(r"\[(\d+)\]", raw)})
+        verified_r = [c for c in cited_r if 0 <= c < len(src_for_llm)]
+        return raw, verified_r, grounding_r, clean_r
+
     # think=True burns ~2-4K tokens on chain-of-thought before the answer.
     # Default num_predict (4096) gets consumed by thinking → empty response.
     # Raise to 8192 when think is on so both thinking + answer fit.
     syn_max_tokens = 8192 if think else _settings.llm.max_tokens
-    syn_timeout = 300.0 if think else _settings.llm.timeout
-    raw = _llm_call(
-        prompt,
-        model=model,
-        system=system,
-        think=think,
-        stream=stream,
-        num_ctx=32768,
-        max_tokens=syn_max_tokens,
-        timeout=syn_timeout,
-    )
+    raw, verified, grounding, clean_raw = _call_and_verify(syn_max_tokens)
     if stream:
         log.info("llm_synthesis_streaming_done", chars=len(raw))
+    # Empty-answer guard (found live 2026-10-07): thinking-native models can
+    # burn the entire budget on reasoning and emit no answer, which would
+    # ship a title-only synthesis. One bounded retry with doubled headroom.
+    if not clean_raw.strip():
+        log.warning(
+            "llm_synthesis_empty_answer",
+            raw_chars=len(raw),
+            retry_max_tokens=min(syn_max_tokens * 2, 16384),
+        )
+        raw, verified, grounding, clean_raw = _call_and_verify(
+            min(syn_max_tokens * 2, 16384)
+        )
     cited = sorted({int(m) - 1 for m in re.findall(r"\[(\d+)\]", raw)})
     verified = [c for c in cited if 0 <= c < len(src_for_llm)]
     unverified = [c for c in cited if c < 0 or c >= len(src_for_llm)]
@@ -7702,9 +7754,6 @@ def _synthesize_llm(
             unverified_indices=[c + 1 for c in unverified],
             note="LLM cited source numbers beyond the provided set",
         )
-    grounding, clean_raw = _verify_quote_grounding(
-        raw, src_for_llm, extracted, query=query
-    )
     return f"# {query}\n\n{clean_raw}", verified, grounding
 
 
@@ -8118,6 +8167,13 @@ def _pro_search(
     else:
         synthesis = _synthesize_heuristic(query, key_findings, sources, cov_map)
 
+    # Empty-body guard (found live 2026-10-07): a title-only synthesis must
+    # never ship when key findings exist — fall back to the structured
+    # heuristic synthesis and say so in the payload.
+    synthesis, synthesis_fallback = _guard_pro_synthesis(
+        synthesis, query, key_findings, sources, cov_map, use_llm
+    )
+
     return {
         "schema": OUTPUT_SCHEMA_VERSION,
         "query": query,
@@ -8141,6 +8197,7 @@ def _pro_search(
         "confidence": confidence,
         "confidence_reason": conf_reason,
         "synthesis": synthesis,
+        "synthesis_fallback": synthesis_fallback,
         "verified_citations": verified_cites,
         "citation_grounding": citation_grounding or None,
         "ungrounded_citations": sum(1 for g in citation_grounding if not g["grounded"]),
