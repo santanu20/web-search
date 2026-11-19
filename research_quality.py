@@ -183,7 +183,7 @@ def audit_claim_citations(synthesis: str, sources: list[dict[str, Any]], extract
     claims = []
     body = str(synthesis or "").split("SOURCES:", 1)[0]
     for raw in body.splitlines():
-        line = re.sub(r"^\s*(?:#{1,6}\s*|[-*+]\s*|\d+[.)]\s*), "", raw).strip()
+        line = re.sub(r"^\s*(?:#{1,6}\s*|[-*+]\s*|\d+[.)]\s*)", "", raw).strip()
         if not line or line.lower().startswith(("coverage", "uncovered", "no substantive evidence")):
             continue
         for sentence in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])", line):
