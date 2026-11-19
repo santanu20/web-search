@@ -57,7 +57,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from research_evidence import unverified_synthesis_claims, verify_synthesis_claims
+from research_evidence import (
+    assign_counter_evidence,
+    build_evidence_sources,
+    extract_claims,
+    plan_counter_queries,
+    unverified_synthesis_claims,
+    verify_synthesis_claims,
+)
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlparse, urlunparse
 from urllib import request as urllib_request
 from urllib import error as urllib_error
@@ -7889,6 +7896,7 @@ def _pro_search(
     auto_crawl: bool = True,
     crawl_pages_per_domain: int = 10,
     verify_claims: bool = False,
+    counter_evidence: bool = False,
 ) -> dict[str, Any]:
     """Perplexity-style agentic research.
 
@@ -8177,6 +8185,89 @@ def _pro_search(
         synthesis, query, key_findings, sources, cov_map, use_llm
     )
 
+    # Independent counter-evidence search is a stricter form of the claim audit.
+    # It uses the remaining research budget and only surfaces evidence found on
+    # new hosts; the verifier still checks exact spans against captured content.
+    if counter_evidence:
+        verify_claims = True
+    counter_extracted: list[dict[str, Any]] = []
+    counter_plan: list[dict[str, str]] = []
+    counter_evidence_by_claim: dict[str, list[str]] = {}
+    counter_meta: dict[str, Any] = {
+        "enabled": counter_evidence, "queries": 0, "results": 0,
+        "extracted": 0, "claims_with_candidates": 0, "status": "not_requested",
+    }
+    if counter_evidence and not use_llm:
+        raise OllamaUnavailable(
+            "--counter-evidence requires an available LLM. Use --use-llm."
+        )
+    if counter_evidence:
+        base_evidence_sources, _ = build_evidence_sources(
+            sources[:20], all_extracted
+        )
+        audit_claims = extract_claims(synthesis, base_evidence_sources, max_claims=8)
+        counter_plan = plan_counter_queries(audit_claims, max_claims=8)
+        counter_meta["queries"] = len(counter_plan)
+        counter_meta["status"] = "no_cited_claims" if not counter_plan else "no_budget"
+        remaining = call_deadline - time.monotonic()
+        if counter_plan and remaining > 5:
+            counter_deadline = min(
+                call_deadline, time.monotonic() + min(remaining, call_budget * 0.20)
+            )
+            counter_seen = set(seen_canon)
+            try:
+                counter_results, counter_extracted = _pro_batch_search(
+                    ddgs,
+                    [item["query"] for item in counter_plan],
+                    top_n=min(16, max(4, len(counter_plan) * 2)),
+                    region=region,
+                    safesearch=safesearch,
+                    timelimit=timelimit,
+                    backend=backend,
+                    cache_ttl=cache_ttl,
+                    neg_cache_ttl=neg_cache_ttl,
+                    call_deadline=counter_deadline,
+                    proxy_for_log=proxy_for_log,
+                    seen_canon=counter_seen,
+                )
+                counter_meta.update({
+                    "results": len(counter_results),
+                    "extracted": len([e for e in counter_extracted if e.get("content")]),
+                    "status": "ok" if counter_extracted else "no_fresh_extractions",
+                })
+                counter_sources, _ = build_evidence_sources([], counter_extracted)
+                counter_evidence_by_claim = assign_counter_evidence(
+                    audit_claims, counter_sources
+                )
+                counter_meta["claims_with_candidates"] = sum(
+                    bool(ids) for ids in counter_evidence_by_claim.values()
+                )
+                # Candidate sources on domains already used by the original
+                # claim are not independent; exclude them before verification.
+                cited_host_by_claim = {
+                    claim.claim_id: {
+                        source.host or (urlparse(source.url).hostname or "")
+                        for source in base_evidence_sources
+                        if source.source_id in claim.cited_source_ids
+                    }
+                    for claim in audit_claims
+                }
+                counter_evidence_by_claim = {
+                    claim_id: [
+                        sid for sid in ids
+                        if next(
+                            (src.host or (urlparse(src.url).hostname or "")
+                             for src in counter_sources if src.source_id == sid),
+                            "",
+                        ) not in cited_host_by_claim.get(claim_id, set())
+                    ]
+                    for claim_id, ids in counter_evidence_by_claim.items()
+                }
+            except SearchError as ex:
+                counter_meta["status"] = "search_failed"
+                counter_meta["error"] = str(ex)[:240]
+                log.warning("counter_evidence_search_failed", error=str(ex)[:120])
+
     # Claim-level audit is opt-in because it requires one additional model call.
     # The audit fails closed: a model label without a matching source quote is
     # never accepted as verified.
@@ -8207,7 +8298,9 @@ def _pro_search(
             )
 
         claim_audit = verify_synthesis_claims(
-            synthesis, sources[:20], all_extracted, _claim_verifier
+            synthesis, sources[:20], all_extracted, _claim_verifier,
+            additional_extracted=counter_extracted,
+            additional_evidence_by_claim=counter_evidence_by_claim,
         )
     else:
         claim_audit = unverified_synthesis_claims(
@@ -8242,6 +8335,18 @@ def _pro_search(
         "citation_grounding": citation_grounding or None,
         "claim_audit": claim_audit["claims"],
         "claim_audit_summary": claim_audit["summary"],
+        "counter_evidence": {
+            **counter_meta,
+            "sources": [
+                {"url": e.get("url") or e.get("href") or "",
+                 "title": e.get("title", ""), "host": e.get("host", "")}
+                for e in counter_extracted if e.get("content")
+            ],
+            "claims": {
+                claim_id: list(source_ids)
+                for claim_id, source_ids in counter_evidence_by_claim.items()
+            },
+        },
         "ungrounded_citations": sum(1 for g in citation_grounding if not g["grounded"]),
         "follow_ups": follow_ups,
         "key_findings": key_findings,
@@ -8671,6 +8776,13 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="run a second LLM pass that audits each cited factual claim against "
         "its cited source text; adds model latency and is enabled only on request.",
+    )
+    p.add_argument(
+        "--counter-evidence",
+        action="store_true",
+        help="independently search for contrary evidence on new hosts for up to "
+        "8 cited claims, then include it in the claim audit; implies --verify-claims "
+        "and consumes additional search, extraction and LLM budget.",
     )
     p.add_argument(
         "--embed-model",
@@ -9917,6 +10029,7 @@ def _dispatch(args) -> int:
                 auto_crawl=not args.no_auto_crawl,
                 crawl_pages_per_domain=args.crawl_pages,
                 verify_claims=args.verify_claims,
+                counter_evidence=args.counter_evidence,
             )
         except OllamaUnavailable as ex:
             # Fail-fast (§5 H1): --use-llm explicitly requested, Ollama unavailable.
