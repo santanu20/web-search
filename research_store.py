@@ -49,10 +49,6 @@ class ResearchStore:
     def __init__(self, path: str | Path | None = None) -> None:
         self.path = Path(path or os.environ.get("WEB_SEARCH_RESEARCH_DB") or DEFAULT_DB_PATH).expanduser()
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        try:
-            os.chmod(self.path.parent, 0o700)
-        except OSError:
-            pass
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
@@ -76,6 +72,7 @@ class ResearchStore:
 
     def _initialize(self) -> None:
         with self._session() as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
             version = int(conn.execute("PRAGMA user_version").fetchone()[0])
             if version > SCHEMA_VERSION:
                 raise RuntimeError(
@@ -343,6 +340,11 @@ class ResearchStore:
                 "new_claims": [],
                 "claim_status_changes": [],
             }
+            if not previous_run_id:
+                diff["new_sources"] = [
+                    {"source_id": source["source_id"], "url": source["url"]}
+                    for source in sources
+                ]
             if previous_run_id:
                 old_source_rows = conn.execute(
                     "SELECT source_id,content_hash FROM run_sources WHERE run_id=?",
