@@ -448,6 +448,74 @@ class ResearchStore:
             runs.append(item)
         return {"project_id": project_id, "runs": runs}
 
+    def get_run(
+        self, project_id: str, run_id: str, *, include_content: bool = False
+    ) -> dict[str, Any] | None:
+        project_id = validate_project_id(project_id)
+        if not re.fullmatch(r"[a-f0-9]{32}", str(run_id)):
+            raise ValueError("run ID must be a 32-character hexadecimal ID")
+        with self._session() as conn:
+            run = conn.execute(
+                "SELECT run_id,project_id,created_at,query,model,synthesis,summary_json "
+                "FROM research_runs WHERE project_id=? AND run_id=?",
+                (project_id, run_id),
+            ).fetchone()
+            if run is None:
+                return None
+            source_rows = conn.execute(
+                "SELECT s.source_id,s.content_hash,s.url,s.title,s.host,s.publisher_id,"
+                "s.source_type,rs.source_role,s.content "
+                "FROM run_sources rs JOIN research_sources s "
+                "ON s.project_id=rs.project_id AND s.source_id=rs.source_id "
+                "AND s.content_hash=rs.content_hash "
+                "WHERE rs.run_id=? ORDER BY s.host,s.url",
+                (run_id,),
+            ).fetchall()
+            claim_rows = conn.execute(
+                "SELECT claim_key,claim_id,claim_text,status FROM run_claims "
+                "WHERE run_id=? ORDER BY claim_id",
+                (run_id,),
+            ).fetchall()
+            evidence_rows = conn.execute(
+                "SELECT e.claim_key,e.source_id,e.source_role,e.stance,e.quote,"
+                "s.url,s.title,s.content_hash "
+                "FROM claim_evidence e LEFT JOIN run_sources rs "
+                "ON rs.run_id=e.run_id AND rs.source_id=e.source_id "
+                "LEFT JOIN research_sources s ON s.project_id=? "
+                "AND s.source_id=rs.source_id AND s.content_hash=rs.content_hash "
+                "WHERE e.run_id=? ORDER BY e.claim_key,e.source_id",
+                (project_id, run_id),
+            ).fetchall()
+        evidence_by_claim: dict[str, list[dict[str, Any]]] = {}
+        for row in evidence_rows:
+            evidence_by_claim.setdefault(row["claim_key"], []).append({
+                "source_id": row["source_id"], "url": row["url"],
+                "title": row["title"], "source_role": row["source_role"],
+                "stance": row["stance"], "quote": row["quote"],
+                "content_hash": row["content_hash"],
+            })
+        sources = []
+        for row in source_rows:
+            item = dict(row)
+            if not include_content:
+                item.pop("content", None)
+            sources.append(item)
+        claims = []
+        for row in claim_rows:
+            item = dict(row)
+            item["evidence"] = evidence_by_claim.get(item["claim_key"], [])
+            claims.append(item)
+        try:
+            summary = json.loads(run["summary_json"])
+        except (TypeError, json.JSONDecodeError):
+            summary = {}
+        return {
+            "run_id": run["run_id"], "project_id": run["project_id"],
+            "created_at": run["created_at"], "query": run["query"],
+            "model": run["model"], "synthesis": run["synthesis"],
+            "summary": summary, "sources": sources, "claims": claims,
+        }
+
     def delete_project(self, project_id: str) -> bool:
         project_id = validate_project_id(project_id)
         with self._session() as conn:
