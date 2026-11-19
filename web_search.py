@@ -1069,6 +1069,32 @@ class ResolvedTarget:
     is_trusted: bool
 
 
+def _curl_resolve_rule(target: ResolvedTarget) -> str | None:
+    """Build a libcurl CURLOPT_RESOLVE rule from already-validated DNS answers.
+
+    Hostname URLs are pinned to the exact addresses checked by SafeURLResolver.
+    IP-literal URLs need no override. All addresses are retained so libcurl
+    can fail over only among addresses that passed the same SSRF policy.
+    """
+    try:
+        ipaddress.ip_address(target.host)
+        return None
+    except ValueError:
+        pass
+
+    host = target.host.encode("idna").decode("ascii")
+    addresses: list[str] = []
+    for raw_ip in target.resolved_ips:
+        address = ipaddress.ip_address(raw_ip)
+        value = f"[{address.compressed}]" if address.version == 6 else address.compressed
+        if value not in addresses:
+            addresses.append(value)
+    if not addresses:
+        raise SearchError(f"No validated addresses available to pin for {target.host}")
+    # '+' makes libcurl's DNS-cache entry expire like an ordinary DNS answer.
+    return f"+{host}:{target.port}:{','.join(addresses)}"
+
+
 class SafeURLResolver:
     """Validates that a URL's resolved IPs are not in forbidden ranges.
 
@@ -3460,25 +3486,28 @@ def _is_bot_blocked(content: str) -> bool:
 def _fetch_curl_cffi(url: str, cookies_header: str = "") -> tuple[str | None, str, str]:
     """Fetch URL with TLS fingerprint impersonation + complete browser headers.
 
-    SSRF-safe: validates resolved IP before fetch AND after every redirect hop
-    (DNS-rebinding guard). Enforces MAX_RESPONSE_BYTES via Content-Length
-    pre-check + post-download body-size check.
+    SSRF-safe for this HTTP transport: validates and pins the resolved IP set
+    into libcurl before each hop, including redirects. Uses a bounded streaming
+    callback so decoded response bytes cannot accumulate beyond
+    MAX_RESPONSE_BYTES before the request returns. Ambient proxy environment
+    variables are disabled because a remote proxy would resolve the origin
+    outside this process's validated-and-pinned address set.
 
     Returns (html, cookies_header_from_response, content_type). Lazy import.
     Raises InvalidURL / SSRFBlocked / BudgetExceeded on policy violation.
     Returns (None, cookies_header, "") on transport failure (existing contract).
     """
-    from curl_cffi import requests as cffi_req  # hard dep
+    from curl_cffi import CurlOpt, requests as cffi_req  # hard dep
 
     resolver = get_safe_url_resolver()
-    # Validate the initial URL — raises InvalidURL/SSRFBlocked before any network call.
-    resolver.resolve_and_validate(url)
+    # The validated DNS answers are also pinned into libcurl below. Validation
+    # without connection pinning is vulnerable to a second DNS lookup at connect.
+    initial_target = resolver.resolve_and_validate(url)
 
     headers = {
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
         "image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
         # WS9: Sec-Ch-Ua must match the advertised Chrome major everywhere
         # (_CHROME_UA_MAJOR) — a 120 header on a chrome124 TLS fingerprint
         # was a free bot tell.
@@ -3505,8 +3534,9 @@ def _fetch_curl_cffi(url: str, cookies_header: str = "") -> tuple[str | None, st
         if not profile.startswith("chrome"):
             for h in ("Sec-Ch-Ua", "Sec-Ch-Ua-Mobile", "Sec-Ch-Ua-Platform"):
                 prof_headers.pop(h, None)
-        # Manual redirect loop: re-validate IP at every hop to defeat DNS rebinding.
+        # Manual redirect loop: validate and pin each hop to the same address set.
         current_url = url
+        current_target = initial_target
         # F-09: per-origin cookie jars. Cookies set by origin A are never
         # replayed to a different origin B down the redirect chain (classic
         # cross-origin leakage), and merging preserves cookies across hops
@@ -3524,97 +3554,121 @@ def _fetch_curl_cffi(url: str, cookies_header: str = "") -> tuple[str | None, st
                     k, v = pair.strip().split("=", 1)
                     _jar_for(url)[k] = v
         try:
-            for _hop in range(DEFAULT_MAX_REDIRECTS + 1):
-                r = cffi_req.get(
-                    current_url,
-                    impersonate=profile,
-                    headers=prof_headers,
-                    timeout=15,
-                    allow_redirects=False,
-                )
-                # Merge set-cookie into THIS origin's jar; replay only that jar.
-                if hasattr(r, "cookies") and r.cookies:
-                    jar = _jar_for(current_url)
-                    for k, v in r.cookies.items():
-                        jar[k] = v
-                jar = _jar_for(current_url)
-                if jar:
-                    prof_headers["Cookie"] = "; ".join(
-                        f"{k}={v}" for k, v in jar.items()
-                    )
-                else:
-                    prof_headers.pop("Cookie", None)
+            # Do not honor ambient HTTP(S)_PROXY settings here: a remote proxy
+            # resolves the target independently, outside this process's SSRF
+            # validation and address pin. Explicit proxy support belongs in a
+            # separately audited transport with destination enforcement.
+            with cffi_req.Session(trust_env=False) as session:
+                for _hop in range(DEFAULT_MAX_REDIRECTS + 1):
+                    resolve_rule = _curl_resolve_rule(current_target)
+                    body_chunks: list[bytes] = []
+                    body_bytes = 0
 
-                # Redirect? Re-validate the target before following.
-                if r.status_code in (301, 302, 303, 307, 308):
-                    loc = r.headers.get("Location") or r.headers.get("location")
-                    if not loc:
-                        # F-32: malformed/challenge-style redirect (no Location).
-                        # CF-shaped challenges expect a same-URL retry carrying
-                        # the just-harvested cookies (merged above), not chain
-                        # abandonment. Bounded by the hop budget below.
-                        log.debug(
-                            "curl_cffi_redirect_no_location",
-                            url=current_url[:60],
-                            profile=profile,
-                            hop=_hop,
-                        )
-                        continue
-                    new_url = urljoin(current_url, loc)
-                    # DNS-rebinding guard: re-resolve + re-check IP policy.
-                    resolver.validate_redirect_target(new_url)
-                    current_url = new_url
-                    continue
-
-                # Non-redirect response. Check Content-Length budget pre-accept.
-                cl = r.headers.get("Content-Length") or r.headers.get("content-length")
-                if cl:
-                    try:
-                        cl_int = int(cl)
-                        if cl_int > DEFAULT_MAX_RESPONSE_BYTES:
+                    def _collect_bounded_chunk(chunk: bytes) -> None:
+                        nonlocal body_bytes
+                        data = bytes(chunk)
+                        body_bytes += len(data)
+                        if body_bytes > DEFAULT_MAX_RESPONSE_BYTES:
                             raise BudgetExceeded(
                                 "MAX_RESPONSE_BYTES",
                                 DEFAULT_MAX_RESPONSE_BYTES,
-                                cl_int,
+                                body_bytes,
                                 current_url,
                             )
-                    except ValueError:
-                        pass  # malformed CL — rely on post-download check
+                        body_chunks.append(data)
 
-                content_type = ""
-                try:
-                    content_type = (
-                        r.headers.get("Content-Type", "")
-                        or r.headers.get("content-type", "")
-                        or ""
+                    r = session.get(
+                        current_url,
+                        impersonate=profile,
+                        headers=prof_headers,
+                        timeout=15,
+                        allow_redirects=False,
+                        accept_encoding="gzip, deflate, br",
+                        curl_options=(
+                            {CurlOpt.RESOLVE: [resolve_rule]}
+                            if resolve_rule
+                            else None
+                        ),
+                        content_callback=_collect_bounded_chunk,
                     )
-                except Exception:
-                    pass
+                    # Merge set-cookie into THIS origin's jar; replay only that jar.
+                    if hasattr(r, "cookies") and r.cookies:
+                        jar = _jar_for(current_url)
+                        for k, v in r.cookies.items():
+                            jar[k] = v
+                    jar = _jar_for(current_url)
+                    if jar:
+                        prof_headers["Cookie"] = "; ".join(
+                            f"{k}={v}" for k, v in jar.items()
+                        )
+                    else:
+                        prof_headers.pop("Cookie", None)
 
-                if r.status_code == 200:
-                    body = r.text or ""
-                    # Post-download size check catches a lying Content-Length.
-                    if (
-                        len(body.encode("utf-8", errors="ignore"))
-                        > DEFAULT_MAX_RESPONSE_BYTES
-                    ):
-                        raise BudgetExceeded(
-                            "MAX_RESPONSE_BYTES",
-                            DEFAULT_MAX_RESPONSE_BYTES,
-                            len(body),
-                            current_url,
+                    # Redirect? Re-validate the target before following.
+                    if r.status_code in (301, 302, 303, 307, 308):
+                        loc = r.headers.get("Location") or r.headers.get("location")
+                        if not loc:
+                            # F-32: malformed/challenge-style redirect (no Location).
+                            # CF-shaped challenges expect a same-URL retry carrying
+                            # the just-harvested cookies (merged above), not chain
+                            # abandonment. Bounded by the hop budget below.
+                            log.debug(
+                                "curl_cffi_redirect_no_location",
+                                url=current_url[:60],
+                                profile=profile,
+                                hop=_hop,
+                            )
+                            continue
+                        new_url = urljoin(current_url, loc)
+                        # DNS-rebinding guard: re-resolve + re-check IP policy.
+                        current_target = resolver.validate_redirect_target(new_url)
+                        current_url = new_url
+                        continue
+
+                    # Non-redirect response. Check Content-Length budget pre-accept.
+                    cl = r.headers.get("Content-Length") or r.headers.get("content-length")
+                    if cl:
+                        try:
+                            cl_int = int(cl)
+                            if cl_int > DEFAULT_MAX_RESPONSE_BYTES:
+                                raise BudgetExceeded(
+                                    "MAX_RESPONSE_BYTES",
+                                    DEFAULT_MAX_RESPONSE_BYTES,
+                                    cl_int,
+                                    current_url,
+                                )
+                        except ValueError:
+                            pass  # malformed CL — rely on post-download check
+
+                    content_type = ""
+                    try:
+                        content_type = (
+                            r.headers.get("Content-Type", "")
+                            or r.headers.get("content-type", "")
+                            or ""
                         )
-                    if len(body) > 500:
-                        log.info(
-                            "curl_cffi_bypass_ok",
-                            url=url[:60],
-                            final_url=current_url[:60],
-                            profile=profile,
-                            chars=len(body),
-                            content_type=content_type.split(";")[0][:60],
+                    except Exception:
+                        pass
+
+                    if r.status_code == 200:
+                        # The callback enforces the cap while libcurl writes
+                        # decompressed response chunks; no unbounded .text buffer.
+                        body_bytes_value = b"".join(body_chunks)
+                        body = body_bytes_value.decode(
+                            getattr(r, "encoding", None) or "utf-8",
+                            errors="replace",
                         )
-                        return body, headers.get("Cookie", ""), content_type
-                break  # non-200 terminal — try next profile
+                        if len(body) > 500:
+                            log.info(
+                                "curl_cffi_bypass_ok",
+                                url=url[:60],
+                                final_url=current_url[:60],
+                                profile=profile,
+                                chars=len(body),
+                                content_type=content_type.split(";")[0][:60],
+                            )
+                            return body, headers.get("Cookie", ""), content_type
+                    break  # non-200 terminal — try next profile
         except (InvalidURL, SSRFBlocked, BudgetExceeded):
             raise  # policy errors propagate immediately, no retry
         except Exception as ex:
