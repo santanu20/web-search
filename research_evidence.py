@@ -209,7 +209,7 @@ def plan_counter_queries(
     for claim in claims:
         if not claim.cited_source_ids:
             continue
-        text = re.sub(r"\\s+", " ", claim.text).strip()
+        text = re.sub(r"\s+", " ", claim.text).strip()
         if len(text) < 15:
             continue
         planned.append({
