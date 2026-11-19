@@ -1,0 +1,14 @@
+# Direct dependencies used by the CLI, extraction cascade and CI test suite.
+# The fully resolved, pinned CI snapshot is generated separately as requirements-ci.txt.
+ddgs
+curl_cffi
+playwright
+trafilatura
+crawl4ai
+beautifulsoup4
+fastembed
+readability-lxml
+html2text
+rank-bm25
+htmldate
+pytest
