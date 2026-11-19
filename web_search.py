@@ -3484,9 +3484,12 @@ def _is_bot_blocked(content: str) -> bool:
 def _fetch_curl_cffi(url: str, cookies_header: str = "") -> tuple[str | None, str, str]:
     """Fetch URL with TLS fingerprint impersonation + complete browser headers.
 
-    SSRF-safe: validates resolved IP before fetch AND after every redirect hop
-    (DNS-rebinding guard). Enforces MAX_RESPONSE_BYTES via Content-Length
-    pre-check + post-download body-size check.
+    SSRF-safe for this HTTP transport: validates and pins the resolved IP set
+    into libcurl before each hop, including redirects. Uses a bounded streaming
+    callback so decoded response bytes cannot accumulate beyond
+    MAX_RESPONSE_BYTES before the request returns. Ambient proxy environment
+    variables are disabled because a remote proxy would resolve the origin
+    outside this process's validated-and-pinned address set.
 
     Returns (html, cookies_header_from_response, content_type). Lazy import.
     Raises InvalidURL / SSRFBlocked / BudgetExceeded on policy violation.
