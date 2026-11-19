@@ -100,7 +100,7 @@ referencing==0.37.0
 regex==2026.11.19
 requests==2.34.2
 rich==15.0.0
-rpds-py==0.37.0
+rpds-py==2026.9.1
 rtree==1.4.1
 scipy==1.18.1
 shapely==2.2.0
