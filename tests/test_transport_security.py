@@ -96,6 +96,7 @@ def test_curl_fetch_pins_validated_dns_and_uses_bounded_body_callback(monkeypatc
     assert calls[0][1]["curl_options"] == {
         999: ["+example.test:443:93.184.216.34"]
     }
+    assert calls[0][1]["accept_encoding"] == "gzip, deflate, br"
     assert callable(calls[0][1]["content_callback"])
 
 
