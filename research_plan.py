@@ -92,20 +92,19 @@ def build_research_plan(
         })
 
     crawl_id = _stable_id("task", normalized_query + "|site-crawl")
-    crawl_id = _stable_id("task", normalized_query + "|site-crawl")
     if auto_crawl:
         tasks.append({
-        "task_id": crawl_id,
-        "kind": "source_deepening",
-        "title": "Deepen evidence from high-value source domains",
-        "question": query,
-        "dependencies": facet_task_ids,
-        "status": "planned",
-        "expected_outputs": ["additional full-text pages", "site-local context"],
-        "acceptance_criteria": ["Additional pages are within crawl and byte budgets."],
-        "budget_seconds": round(crawl_budget, 2),
-        "result": None,
-    })
+            "task_id": crawl_id,
+            "kind": "source_deepening",
+            "title": "Deepen evidence from high-value source domains",
+            "question": query,
+            "dependencies": facet_task_ids,
+            "status": "planned",
+            "expected_outputs": ["additional full-text pages", "site-local context"],
+            "acceptance_criteria": ["Additional pages are within crawl and byte budgets."],
+            "budget_seconds": round(crawl_budget, 2),
+            "result": None,
+        })
 
     synthesis_id = _stable_id("task", normalized_query + "|synthesis")
     tasks.append({
