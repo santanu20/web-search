@@ -112,6 +112,18 @@ in a source cited by that claim. It is model-assisted entailment assessment,
 not formal proof or calibrated factual confidence; see
 [`docs/CLAIM_EVIDENCE_AUDIT.md`](docs/CLAIM_EVIDENCE_AUDIT.md).
 
+Optional claim-level verification and counter-evidence discovery:
+
+```bash
+.venv/bin/python web_search.py pro "how do ETFs create and redeem shares" --use-llm --counter-evidence
+```
+
+`--counter-evidence` implies `--verify-claims`. It performs up to eight targeted
+searches for contrary evidence on hosts not already used in the investigation.
+The verifier distinguishes original citations from counter-evidence and checks
+quotes against captured pages. A different host is not proof of organizational
+independence. See [the claim evidence audit guide](docs/CLAIM_EVIDENCE_AUDIT.md).
+
 ## Configuration
 
 Model, egress and security behavior are env-configurable: `WEB_SEARCH_LLM_MODEL`,
