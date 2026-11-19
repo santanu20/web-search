@@ -4161,6 +4161,18 @@ class _PinnedConnectProxyHandler(socketserver.BaseRequestHandler):
                     return
 
 
+def _pinned_proxy_chromium_args() -> list[str]:
+    """Chromium launch flags required to force every origin via local proxy."""
+    return [
+        "--disable-blink-features=AutomationControlled",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        # Chromium bypasses system proxies for loopback by default. Remove
+        # that exception so local/private origins still traverse CONNECT.
+        "--proxy-bypass-list=<-loopback>",
+    ]
+
+
 class _PinnedConnectProxy:
     """Lifecycle wrapper for the per-navigation HTTPS CONNECT proxy."""
 
@@ -4280,26 +4292,13 @@ def _fetch_playwright(url: str, cookies_header: str = "") -> tuple[str | None, s
                     headless=True,
                     viewport={"width": 1920, "height": 1080},
                     proxy=proxy_settings,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--no-sandbox",
-                        "--disable-dev-shm-usage",
-                        # Chromium bypasses system proxies for loopback by
-                        # default; disable that exception so local/private
-                        # origins still traverse the pinned CONNECT proxy.
-                        "--proxy-bypass-list=<-loopback>",
-                    ],
+                    args=_pinned_proxy_chromium_args(),
                 )
                 _persistent_ctx = True
             else:
                 browser = p.chromium.launch(
                     headless=True,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--no-sandbox",
-                        "--disable-dev-shm-usage",
-                        "--proxy-bypass-list=<-loopback>",
-                    ],
+                    args=_pinned_proxy_chromium_args(),
                 )
                 context = browser.new_context(
                     viewport={"width": 1920, "height": 1080},
