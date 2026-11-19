@@ -451,6 +451,17 @@ uv run python $SCRIPT pro "kubernetes pod security" --use-llm \
 
 ```
 
+### Research coverage matrix
+
+The Pro response includes `research_coverage` and `coverage_matrix[]`. Each
+facet is one of the decomposed sub-questions. Evidence pages are matched using
+lexical terms and grouped by the publisher/near-duplicate clusters in
+`source_profiles[]`. A facet is `covered` only when term coverage reaches the
+configured threshold and at least two evidence-origin clusters are present;
+otherwise it is `partial` or `gap`. The matrix exposes missing terms and
+recommended follow-up queries. It is an evidence-sufficiency diagnostic, not
+factual confidence or proof that a research topic is complete.
+
 ### Output schema (progressive disclosure)
 
 ```json
@@ -497,7 +508,18 @@ uv run python $SCRIPT pro "kubernetes pod security" --use-llm \
      "primary_source_candidate":false, "independence_cluster_id":"...",
      "duplicate_source_ids":[], "source_signals":["news_publisher_signal"]}],
   "source_duplicate_pairs": [{"source_a":"...", "source_b":"...", "similarity":0.91,
-     "method":"near_duplicate_shingles"}]
+     "method":"near_duplicate_shingles"}],
+  "research_coverage": {"facet_count": 4, "covered": 2, "partial": 1, "gap": 1,
+     "covered_facet_ratio": 0.5, "minimum_independent_origins": 2,
+     "classification": "lexical evidence sufficiency diagnostic",
+     "is_factual_confidence": false},
+  "coverage_matrix": [{"facet_id":"F01", "facet":"market size trends",
+     "status":"partial", "matched_terms":["market","size"], "missing_terms":["trends"],
+     "term_coverage_ratio":0.67, "evidence_page_count":2,
+     "publisher_count":2, "independent_origin_count":1,
+     "primary_source_candidate_count":1,
+     "recommended_query":"original query market size trends primary sources independent evidence",
+     "evidence":[{"url":"...","excerpt":"...","independence_cluster_id":"..."}]}]
 }
 ```
 
@@ -509,6 +531,7 @@ uv run python $SCRIPT pro "kubernetes pod security" --use-llm \
 - **Quote grounding (WS5)**: the LLM must append a `SOURCES:` section with one verbatim ≤40-word quote per cited source. Each quote is fuzzy-verified against the source's extracted content (exact substring → ratio 1.0; else sliding-window `difflib.SequenceMatcher`, floor 0.65). Verdicts surface in `citation_grounding[]` + `ungrounded_citations`. Ungrounded citations are **flagged, never removed** — the verifier reports, the agent judges.
 - **No fabrication instruction**: system prompt explicitly says "If evidence does not cover an aspect, say so explicitly."
 - **Counter-evidence discovery (opt-in)**: `--counter-evidence` implies `--verify-claims`, creates up to 8 contrary-evidence queries, searches for URLs not already used in the investigation, and attaches relevant results from different hosts to the matching claim. A different host does not prove organizational independence. Search and extraction consume the remaining research budget.
+- **Research coverage matrix**: Pro output includes `research_coverage` and per-facet `coverage_matrix[]`. A facet is covered only when its matched terms reach the threshold and evidence comes from at least two source-origin clusters; otherwise it is partial/gap. The output identifies missing terms, primary-source candidate counts, and recommended follow-up queries. This is a lexical sufficiency diagnostic, not a factual-confidence score.
 - **Source lineage and independence**: Pro output includes `source_intelligence`, per-source `source_profiles`, and `source_duplicate_pairs`. It groups same registrable publisher domains and flags exact/near-duplicate extracted content across different hosts. Source types and primary-source flags are explainable heuristics, not an authority score. Unknown public suffixes are host-scoped; different publisher groups still do not prove institutional independence.
 - **Claim-level audit (opt-in)**: `--verify-claims` performs one additional LLM pass over the sources already cited by each claim. A claim is marked `supported` only when the model judges it supported AND a verbatim evidence quote is found in that claim's cited source snapshot. Contradicting spans produce `contradicted` or `mixed`; absent/invalid spans produce `unverified`. This is model-assisted entailment checking, not formal proof or a calibrated confidence score. It does not independently discover contrary sources. Details: `docs/CLAIM_EVIDENCE_AUDIT.md`.
 
