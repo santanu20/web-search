@@ -9,13 +9,17 @@ def test_plan_contains_objective_facets_crawl_and_synthesis_dependencies():
         max_rounds=3, call_budget_s=120, top_n_per_facet=6,
     )
     assert plan["schema"] == "research.plan.v1"
-    assert len(plan["tasks"]) == 4
-    objective, facet_a, facet_b, synthesis = plan["tasks"]
-    assert objective["kind"] == "objective"
-    assert facet_a["kind"] == facet_b["kind"] == "evidence_retrieval"
-    assert synthesis["kind"] == "synthesis"
-    assert facet_a["dependencies"] == [objective["task_id"]]
-    assert synthesis["dependencies"] == [facet_a["task_id"], facet_b["task_id"], plan["tasks"][3 - 0]["task_id"]] or synthesis["dependencies"][-1] == plan["tasks"][2]["task_id"]
+    assert len(plan["tasks"]) == 5
+    by_kind = {task["kind"]: task for task in plan["tasks"]}
+    assert by_kind["objective"]["status"] == "complete"
+    facet_tasks = [task for task in plan["tasks"] if task["kind"] == "evidence_retrieval"]
+    assert len(facet_tasks) == 2
+    assert all(task["dependencies"] == [by_kind["objective"]["task_id"]] for task in facet_tasks)
+    assert by_kind["source_deepening"]["dependencies"] == [task["task_id"] for task in facet_tasks]
+    assert by_kind["synthesis"]["dependencies"] == [
+        *[task["task_id"] for task in facet_tasks],
+        by_kind["source_deepening"]["task_id"],
+    ]
 
 
 def test_plan_ids_are_deterministic_for_same_normalized_query_and_facets():
