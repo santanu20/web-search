@@ -60,6 +60,7 @@ from typing import Any, Protocol
 from source_intelligence import analyze_sources
 from research_coverage import build_coverage_matrix
 from research_store import ResearchStore
+from research_plan import annotate_research_plan, build_research_plan
 
 from research_evidence import (
     assign_counter_evidence,
@@ -8306,6 +8307,28 @@ def _pro_search(
             synthesis, sources[:20], all_extracted
         )
 
+    research_plan = build_research_plan(
+        query,
+        sub_queries,
+        max_rounds=max_rounds,
+        call_budget_s=call_budget,
+        top_n_per_facet=top_n_per_facet,
+        verify_claims=verify_claims,
+        counter_evidence=counter_evidence,
+        semantic_coverage=semantic_coverage,
+        auto_crawl=auto_crawl,
+    )
+    research_plan = annotate_research_plan(
+        research_plan,
+        coverage_matrix=research_coverage["facets"],
+        rounds=rounds_meta,
+        crawl_meta=crawl_meta,
+        claim_audit_summary=claim_audit["summary"],
+        counter_evidence=counter_meta,
+        semantic_coverage=sem_cov_frac,
+        synthesis=synthesis,
+    )
+
     payload = {
         "schema": OUTPUT_SCHEMA_VERSION,
         "query": query,
@@ -8355,6 +8378,7 @@ def _pro_search(
         "source_duplicate_pairs": source_intelligence["duplicate_pairs"],
         "research_coverage": research_coverage["summary"],
         "coverage_matrix": research_coverage["facets"],
+        "research_plan": research_plan,
         "results": all_results,
         "meta": {
             "pages_fetched": len(all_results),
