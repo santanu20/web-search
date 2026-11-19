@@ -1236,7 +1236,7 @@ def test_llm_call_dispatch_routes_to_openai_worker(monkeypatch):
 def test_llm_call_dispatch_routes_to_ollama_worker(monkeypatch):
     calls = {"worker": 0}
 
-    def fake_probe(host=None, timeout=2.0):
+    def fake_probe(host=None, timeout=2.0, **kwargs):
         return "ollama"
 
     def fake_worker(*a, **k):
