@@ -118,6 +118,28 @@ The verifier distinguishes original citations from counter-evidence and checks
 quotes against captured pages. A different host is not proof of organizational
 independence. See [the claim evidence audit guide](docs/CLAIM_EVIDENCE_AUDIT.md).
 
+## Persistent research projects
+
+Save Pro runs into a local SQLite project workspace:
+
+```bash
+.venv/bin/python web_search.py pro "Indian EV battery market" --use-llm --counter-evidence --project indian-ev-battery
+.venv/bin/python web_search.py projects
+.venv/bin/python web_search.py projects --project-id indian-ev-battery --runs 10
+```
+
+Run IDs can be retrieved with `projects --project-id ID --run-id RUN_ID`.
+Use `--include-content` to include captured source snapshots. Delete a
+project and all of its stored runs/evidence with
+`projects --project-id ID --delete --yes`.
+
+The store defaults to `~/.cache/web-search/research.db`; override it with
+`--research-db PATH` or `WEB_SEARCH_RESEARCH_DB`. It stores source snapshots
+(up to 100,000 characters per source, 100 sources per run), claims, accepted
+evidence spans, synthesis summaries and run-to-run diffs. Claim status changes
+are compared only when the normalized query is unchanged. This is an optional
+single-user local store, not a multi-tenant or encrypted enterprise database.
+
 ## Configuration
 
 Model and behavior are env-configurable: `WEB_SEARCH_LLM_MODEL`,
