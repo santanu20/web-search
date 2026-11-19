@@ -60,7 +60,7 @@ def test_unit__llm_call__explicit_model_beats_light_routing(monkeypatch):
 
     cfg = dataclasses.replace(ws._settings, llm=_settings_with())
     monkeypatch.setattr(ws, "_settings", cfg)
-    monkeypatch.setattr(ws, "_llm_probe", lambda host=None: "ollama")
+    monkeypatch.setattr(ws, "_llm_probe", lambda host=None, **kwargs: "ollama")
     monkeypatch.setattr(
         ws.urllib_request,
         "urlopen",
