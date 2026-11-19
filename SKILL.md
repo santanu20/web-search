@@ -371,8 +371,8 @@ search+extract → coverage reflection → synthesis with citations**. Two paths
 | Path | Trigger | Behaviour |
 |------|---------|-----------|
 | **auto** (default) | no flag | probes local LLM once (Ollama `/api/tags` or OpenAI-compatible `/v1/models`); LLM path if reachable, heuristic otherwise. Logged as `pro_llm_auto selected=llm\|heuristic`; payload carries `llm_mode`/`llm_provider`. |
-| **heuristic** | `--no-llm` | noun-phrase decomposition, keyword coverage scoring, structured markdown synthesis. Forced, no LLM contact at all. |
-| **LLM** | `--use-llm` | LLM decomposition (sub-questions), gap reflection, prose synthesis with `[n]` citations, quote-grounded SOURCES verification, follow-up questions. **Fail-fast** if no local LLM reachable (explicit opt-in must not silently degrade). |
+| **heuristic** | `--no-llm` | Question-type-aware facet planning, independent-domain lexical coverage, targeted deterministic gap queries, diverse evidence selection and structured markdown synthesis. Forced, no LLM contact at all. |
+| **LLM** | `--use-llm` | LLM research-facet decomposition, evidence-gap reflection, source-aware prose synthesis, `[n]` citations, quote grounding and follow-up questions. **Fail-fast** if no local LLM reachable (explicit opt-in must not silently degrade). |
 
 ```bash
 # AUTO (default): LLM path if a local LLM answers the probe, heuristic otherwise
@@ -405,29 +405,37 @@ uv run python $SCRIPT pro "kubernetes pod security" --use-llm \
 
 ### Pipeline
 
-```
-1. DECOMPOSE
-   heuristic: split on conjunctions → noun-phrase facets (1-6)
-   llm:       Ollama prompt → 3-6 sub-questions
+\`\`\`
+1. RESEARCH PLAN
+   heuristic: original question + question-type-aware facets (comparison,
+              mechanism, policy, evidence, counterarguments, limitations)
+   llm:       4-6 distinct, searchable facets from the light model
+   original query is always retained as the first retrieval query
 
 2. MULTI-ROUND LOOP (max_rounds, default 5)
-   round 0: batch search all facets (parallel) + extract top-15
-   round 1+: coverage check → if <threshold: generate gap queries → search+extract
-             stop conditions: coverage ≥ threshold | no gaps | converged | budget
+   round 0: parallel search across the planned facets + full-page extraction
+   round 1+: evaluate each facet against extracted evidence from >=2 hosts;
+             generate focused searches for facets that remain uncovered
+   stop: facet coverage threshold | no new gaps | low-yield convergence |
+         round limit | research time budget
 
-3. AUTO-CRAWL (default ON, --no-auto-crawl to disable)
-   rank domains by result count → crawl top-3 (skip search engines/social)
-   10 pages each → adds ~20-30 full pages of evidence beyond search snippets
+3. SOURCE SELECTION + AUTO-CRAWL
+   rank crawl seeds by query relevance, configured domain tier and facet breadth
+   rather than raw hit count; skip search engines/social hosts via blocklist
+   select up to 20 evidence pages with a maximum of 2 per host and reduce
+   lexical redundancy before assigning citation numbers
 
-4. SYNTHESIZE
-   heuristic: structured markdown — key findings ranked by relevance, [[n]] citations
-   llm:       prose answer with [n] citations (post-checked against source list),
-              20 sources × 4000 chars evidence, num_ctx=32768, follow-up questions,
-              then quote-grounding: model appends a SOURCES: section with one
-              verbatim ≤40-word quote per citation; each quote is fuzzy-verified
-              (difflib, ratio floor 0.65) against the extracted page content and
-              the per-citation verdict lands in `citation_grounding[]`.
-```
+4. SYNTHESIS + AUDIT
+   heuristic: structured findings with source references
+   llm:       evidence-only synthesis with inline [n] citations and a
+              SOURCES section of verbatim quotes for quote-grounding checks
+   all modes: report claim-level citation presence, out-of-range references,
+              and lexical overlap diagnostics
+\`\`\`
+
+A crawl reserve of up to 20% of the configured call budget is retained when
+auto-crawl is enabled. The total orchestration deadline is not extended to
+make up for time already consumed by planning or search.
 
 ### Output schema (progressive disclosure)
 
@@ -440,11 +448,14 @@ uv run python $SCRIPT pro "kubernetes pod security" --use-llm \
   "llm_available": true,
   "llm_provider": "ollama|openai|null",
   "model": "qwen3.5:9b | null",
-  "sub_queries": ["facet1", "facet2", ...],
-  "rounds": [{"round": 0, "status": "ok", "n_queries": 3, "n_new_results": 20, ...}],
+  "sub_queries": ["original question", "facet1", "facet2", ...],
+  "research_facets": ["original question", "facet1", "facet2", ...],
+  "rounds": [{"round": 0, "status": "ok", "n_queries": 5, "facet_coverage": 0.2, ...}],
   "n_rounds": 2,
   "coverage": 0.85,
   "coverage_detail": {"rust": ["url1","url2"], "ownership": ["url1"], ...},
+  "facet_coverage": 0.6,
+  "facet_coverage_detail": {"facet1": {"covered": true, "domains": ["a.example", "b.example"], ...}},
   "confidence": 0.9,
   "confidence_reason": "sufficient_evidence",
   "synthesis": "# Question\n\n## Key findings\n1. ... [[1]]\n...",
@@ -454,6 +465,12 @@ uv run python $SCRIPT pro "kubernetes pod security" --use-llm \
     {"index": 2, "quote": "quote not found in extracted content", "grounded": false, "ratio": 0.31}
   ],
   "ungrounded_citations": 1,
+  "citation_audit": {
+    "n_claims": 8, "n_cited_claims": 7, "n_uncited_claims": 1,
+    "n_invalid_citations": 0, "citation_coverage": 0.875,
+    "claims": [{"text": "...", "valid_citations": [1], "lexical_overlap": 0.42, "status": "cited"}],
+    "interpretation": "Citation presence and lexical overlap are diagnostics, not proof of semantic entailment or factual correctness."
+  },
   "follow_ups": ["related question 1", ...],
   "key_findings": [{"url":"...", "passage":"...", "relevance": 0.8}],
   "sources": [{"url":"...", "title":"...", "host":"...", "tier": 0}]
@@ -462,11 +479,14 @@ uv run python $SCRIPT pro "kubernetes pod security" --use-llm \
 
 ### Anti-hallucination safeguards (LLM path)
 
-- **Verbatim evidence only**: LLM receives full extracted passages (≤2000 chars each, top-10 sources), not snippets.
-- **Numbered citations**: prompt instructs `[1]`, `[2]` etc. matching the provided source list.
-- **Post-check**: every `[n]` in synthesis is regex-extracted and verified against the source list. Out-of-range citations logged as `llm_citation_overflow`.
-- **Quote grounding (WS5)**: the LLM must append a `SOURCES:` section with one verbatim ≤40-word quote per cited source. Each quote is fuzzy-verified against the source's extracted content (exact substring → ratio 1.0; else sliding-window `difflib.SequenceMatcher`, floor 0.65). Verdicts surface in `citation_grounding[]` + `ungrounded_citations`. Ungrounded citations are **flagged, never removed** — the verifier reports, the agent judges.
-- **No fabrication instruction**: system prompt explicitly says "If evidence does not cover an aspect, say so explicitly."
+- **Untrusted-source isolation**: extracted webpage text is bracketed as `UNTRUSTED_SOURCE_CONTENT`; the synthesis instructions explicitly say to ignore commands, prompts, role changes and tool directions embedded in retrieved pages.
+- **Numbered citations**: factual claims must cite `[1]`, `[2]`, etc. matching the numbered source list.
+- **Post-check**: citation indices are checked against the source list. Out-of-range citations are logged.
+- **Quote grounding**: the LLM appends a `SOURCES:` section with a verbatim ≤40-word quote per cited source. Each quote is checked against extracted page content (exact match or bounded fuzzy comparison). Ungrounded quotes are flagged, not silently removed.
+- **Claim audit**: answer sentences are checked for citation presence, in-range references and lexical overlap with cited source text. This is a diagnostic only: lexical overlap and a grounded quote do **not** prove that the source entails the claim.
+- **Source diversity**: evidence selection caps pages per host, removes duplicate URLs and rewards lexical novelty; configured domain tiers are ranking signals, not blanket endorsements.
+- **Disagreement handling**: synthesis instructions ask the model to attribute opposing views and preserve meaningful counterevidence instead of inventing consensus.
+- **No fabrication instruction**: if evidence does not answer part of the question, the model must say so explicitly.
 
 ### LLM config (no hardcoded models)
 
