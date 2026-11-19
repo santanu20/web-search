@@ -8675,7 +8675,7 @@ def _pro_search(
             "--counter-evidence requires an available LLM. Use --use-llm."
         )
     if counter_evidence:
-        base_evidence_sources, _ = build_evidence_sources(
+        base_evidence_sources, base_sources_by_id = build_evidence_sources(
             sources[:20], all_extracted
         )
         audit_claims = extract_claims(synthesis, base_evidence_sources, max_claims=8)
@@ -8710,32 +8710,12 @@ def _pro_search(
                 })
                 counter_sources, _ = build_evidence_sources([], counter_extracted)
                 counter_evidence_by_claim = assign_counter_evidence(
-                    audit_claims, counter_sources
+                    audit_claims, counter_sources,
+                    cited_sources_by_id=base_sources_by_id,
                 )
                 counter_meta["claims_with_candidates"] = sum(
                     bool(ids) for ids in counter_evidence_by_claim.values()
                 )
-                # Candidate sources on domains already used by the original
-                # claim are not independent; exclude them before verification.
-                cited_host_by_claim = {
-                    claim.claim_id: {
-                        source.host or (urlparse(source.url).hostname or "")
-                        for source in base_evidence_sources
-                        if source.source_id in claim.cited_source_ids
-                    }
-                    for claim in audit_claims
-                }
-                counter_evidence_by_claim = {
-                    claim_id: [
-                        sid for sid in ids
-                        if next(
-                            (src.host or (urlparse(src.url).hostname or "")
-                             for src in counter_sources if src.source_id == sid),
-                            "",
-                        ) not in cited_host_by_claim.get(claim_id, set())
-                    ]
-                    for claim_id, ids in counter_evidence_by_claim.items()
-                }
             except SearchError as ex:
                 counter_meta["status"] = "search_failed"
                 counter_meta["error"] = str(ex)[:240]
