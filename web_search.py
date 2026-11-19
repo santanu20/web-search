@@ -59,6 +59,7 @@ from typing import Any, Protocol
 
 from source_intelligence import analyze_sources
 from research_coverage import build_coverage_matrix
+from research_store import ResearchStore
 
 from research_evidence import (
     assign_counter_evidence,
@@ -7900,6 +7901,8 @@ def _pro_search(
     crawl_pages_per_domain: int = 10,
     verify_claims: bool = False,
     counter_evidence: bool = False,
+    project_id: str | None = None,
+    research_db: str | None = None,
 ) -> dict[str, Any]:
     """Perplexity-style agentic research.
 
@@ -8303,7 +8306,7 @@ def _pro_search(
             synthesis, sources[:20], all_extracted
         )
 
-    return {
+    payload = {
         "schema": OUTPUT_SCHEMA_VERSION,
         "query": query,
         "mode": "llm" if use_llm else "heuristic",
@@ -8365,6 +8368,31 @@ def _pro_search(
             else None,
         },
     }
+
+    # Workspace persistence is opt-in. A storage failure is surfaced in the
+    # response without discarding the live research result.
+    if project_id:
+        try:
+            workspace = ResearchStore(path=research_db).save_project_run(
+                project_id,
+                payload,
+                all_extracted,
+                counter_extracted=counter_extracted,
+            )
+            payload["workspace"] = workspace
+        except Exception as ex:
+            log.error(
+                "research_workspace_save_failed",
+                project_id=str(project_id)[:100],
+                error=str(ex)[:200],
+            )
+            payload["workspace"] = {
+                "status": "save_failed",
+                "project_id": str(project_id)[:100],
+                "error": f"{type(ex).__name__}: {str(ex)[:240]}",
+            }
+    return payload
+
 
 
 # --------------------------------------------------------------------------- #
@@ -8786,6 +8814,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "and consumes additional search, extraction and LLM budget.",
     )
     p.add_argument(
+        "--project",
+        default=None,
+        help="persist this Pro run in a local named research workspace (opt-in). "
+        "Repeated runs with the same normalized query include source/claim changes.",
+    )
+    p.add_argument(
+        "--research-db",
+        default=None,
+        help="SQLite workspace path (default: WEB_SEARCH_RESEARCH_DB or "
+        "~/.cache/web-search/research.db); used with --project and the projects command.",
+    )
+    p.add_argument(
         "--embed-model",
         default=None,
         help=f"Ollama embedding model for --semantic-coverage (default: env "
@@ -8890,6 +8930,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "adaptive stop).",
     )
     _common_ddgs_args(p, call_budget=True)
+
+    p_projects = sub.add_parser(
+        "projects", help="list, inspect or delete local research workspaces"
+    )
+    p_projects.add_argument("--project-id", default=None)
+    p_projects.add_argument("--runs", type=int, default=0, help="show latest N runs for a project")
+    p_projects.add_argument("--delete", action="store_true", help="delete a project and its stored evidence")
+    p_projects.add_argument("--yes", action="store_true", help="confirm project deletion")
+    p_projects.add_argument("--db", default=None)
 
     sub.add_parser("backends", help="list available engines per category")
     p_metrics = sub.add_parser(
@@ -9676,9 +9725,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _dispatch(args) -> int:
-    # Hard-dep gate — fail fast BEFORE any work, including self-check.
-    # Exception: --help / no-cmd pass-through (argparse handles --help itself).
-    if args.cmd or args.self_check:
+    # Hard-dep gate — fail fast BEFORE research work. Local workspace
+    # inspection/deletion uses only stdlib SQLite and does not require crawler
+    # or search-provider dependencies.
+    if (args.cmd and args.cmd != "projects") or args.self_check:
         _check_required_deps()
     if args.self_check:
         return _self_check()
@@ -9695,6 +9745,26 @@ def _dispatch(args) -> int:
     if DEFAULT_PERSIST_STATE:
         _restore_runtime_state()
         atexit.register(_save_runtime_state)
+
+    if args.cmd == "projects":
+        store = ResearchStore(path=args.db)
+        if args.delete:
+            if not args.project_id or not args.yes:
+                _emit({
+                    "error": "confirmation_required",
+                    "message": "projects --delete requires --project-id and --yes.",
+                })
+                return 2
+            deleted = store.delete_project(args.project_id)
+            _emit({"deleted": deleted, "project_id": args.project_id})
+        elif args.runs:
+            if not args.project_id:
+                _emit({"error": "project_required", "message": "--runs requires --project-id."})
+                return 2
+            _emit(store.list_runs(args.project_id, limit=args.runs))
+        else:
+            _emit(store.list_projects(args.project_id))
+        return 0
 
     if args.cmd == "backends":
         try:
@@ -10031,6 +10101,8 @@ def _dispatch(args) -> int:
                 crawl_pages_per_domain=args.crawl_pages,
                 verify_claims=args.verify_claims,
                 counter_evidence=args.counter_evidence,
+                project_id=args.project,
+                research_db=args.research_db,
             )
         except OllamaUnavailable as ex:
             # Fail-fast (§5 H1): --use-llm explicitly requested, Ollama unavailable.
