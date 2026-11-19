@@ -7628,7 +7628,7 @@ def _verify_quote_grounding(
     m = re.search(r"SOURCES:\s*\n(.*)\Z", synthesis_raw, re.DOTALL)
     if not m:
         return [], synthesis_raw
-    query_terms = {t.lower() for t in query.split() if len(t) > 2}
+    query_terms = rq.tokenize_terms(query)
     records: list[dict[str, Any]] = []
     for line in m.group(1).splitlines():
         lm = re.match(r"^\s*(\d{1,2})\.\s*[\"'\u201c](.+?)[\"'\u201d]\s*$", line)
@@ -8065,10 +8065,10 @@ def _pro_search(
             rounds_meta[-1]["status"] = "converged"
             break
 
-    # PHASE 2b: auto-crawl top domains for site-wide depth.
-    # Ranks domains by result count, crawls top-3 (skipping search engines/social
-    # media via _CRAWL_BLOCKLIST). Adds ~20-30 full pages of evidence that search
-    # snippets can't surface. Budget: 25% of call_budget.
+    # PHASE 2b: crawl the highest-quality, query-relevant seed domains.
+    # Domain scoring considers relevance, configured authority tier and facet
+    # breadth; raw hit volume is deliberately capped so one noisy host cannot
+    # monopolize crawl slots. The crawl uses only the reserved portion of budget.
     crawl_meta: list[dict[str, Any]] = []
     if auto_crawl and all_results:
         ranked_domains = rq.rank_domains_for_crawl(
@@ -8076,10 +8076,7 @@ def _pro_search(
         )
         top_domains = [(d["host"], d["n_results"]) for d in ranked_domains]
         domain_seed_urls = {d["host"]: d["seed_url"] for d in ranked_domains}
-        # Protected crawl budget: guarantee at least 20% of call_budget for crawl,
-        # even if LLM decomposition/gap calls consumed most of the time.
-        # This fixes the benchmark finding where pro-LLM read fewer pages than
-        # pro-heuristic (LLM calls ate the crawl budget).
+        domain_tiers = {d["host"]: d["tier"] for d in ranked_domains}
         crawl_deadline = call_deadline
         for domain, count in top_domains:
             if time.monotonic() > crawl_deadline:
@@ -8108,14 +8105,7 @@ def _pro_search(
                                 "title": p.get("title", ""),
                                 "content": content,
                                 "host": domain,
-                                "tier": next(
-                                    (
-                                        r.get("tier", 3)
-                                        for r in all_results
-                                        if r.get("host") == domain
-                                    ),
-                                    3,
-                                ),
+                                "tier": domain_tiers.get(domain, 3),
                             }
                         )
                 crawl_meta.append(
