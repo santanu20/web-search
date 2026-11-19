@@ -865,7 +865,7 @@ sequence ≈ 1.5s → 3s → 6s → 12s → 24s (+30% jitter), max 30s.
 |-----|---------|---------|
 | `WEB_SEARCH_EXTRACT_CHARS` | `0` | max chars per page (0=unlimited) |
 | `WEB_SEARCH_AGENTIC_MAX_ITER` | `8` | agentic max iterations |
-| `WEB_SEARCH_CONCURRENCY` | `3` | batch max parallel |
+| `WEB_SEARCH_CONCURRENCY` | `3` | batch max parallel (clamped to 1–16 to bound thread creation) |
 | `WEB_SEARCH_AGENTIC_MAX_RESULTS_PER_ITER` | `15` | max results fetched per agentic iteration |
 | `WEB_SEARCH_EMIT_CITATIONS` | `1` | set `0`: drop citations[] (duplicates results fields) for lean agent payloads |
 | `WEB_SEARCH_FLOOR_LINK_RATIO` | `0.5` | content floor: reject pages >50% markdown link/image scaffolding |
