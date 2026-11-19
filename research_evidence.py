@@ -226,6 +226,7 @@ def assign_counter_evidence(
     claims: list[ResearchClaim],
     counter_sources: list[EvidenceSource],
     *,
+    cited_sources_by_id: dict[str, EvidenceSource] | None = None,
     max_per_claim: int = 3,
     min_overlap: int = 2,
 ) -> dict[str, list[str]]:
@@ -243,9 +244,9 @@ def assign_counter_evidence(
             if token not in _COUNTER_STOPWORDS
         }
         cited_hosts = {
-            urlsplit(source.url).hostname or ""
-            for source in counter_sources
-            if source.source_id in claim.cited_source_ids
+            (source.host or urlsplit(source.url).hostname or "")
+            for source_id in claim.cited_source_ids
+            if (source := (cited_sources_by_id or {}).get(source_id)) is not None
         }
         candidates: list[tuple[float, str, str]] = []
         for source in counter_sources:
