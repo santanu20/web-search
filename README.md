@@ -27,6 +27,7 @@ Two ways to use it:
 | Quote-grounded citations | Inline `[n]` markers resolve to real sources and model-provided source quotes are checked against extracted content |
 | Claim-level audit (opt-in) | `--verify-claims` assesses each cited factual claim and rejects evidence quotes absent from the cited source snapshot |
 | Source lineage | Groups sources by publisher domain and identifies exact/near-duplicate content to avoid counting syndicated copies as independent corroboration |
+| Research coverage matrix | Tracks decomposed research facets against extracted passages and independent evidence origins; surfaces gaps and suggested follow-up queries |
 | Smart model routing | A small model handles query decomposition / reranking; the big model only synthesizes — CPU-friendly |
 | Keyless | No API keys for any of it. Local models optional. |
 
