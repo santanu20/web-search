@@ -8936,6 +8936,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_projects.add_argument("--project-id", default=None)
     p_projects.add_argument("--runs", type=int, default=0, help="show latest N runs for a project")
+    p_projects.add_argument("--run-id", default=None, help="retrieve a stored run by ID")
+    p_projects.add_argument("--include-content", action="store_true", help="include captured source text in run output")
     p_projects.add_argument("--delete", action="store_true", help="delete a project and its stored evidence")
     p_projects.add_argument("--yes", action="store_true", help="confirm project deletion")
     p_projects.add_argument("--db", default=None)
@@ -9757,6 +9759,17 @@ def _dispatch(args) -> int:
                 return 2
             deleted = store.delete_project(args.project_id)
             _emit({"deleted": deleted, "project_id": args.project_id})
+        elif args.run_id:
+            if not args.project_id:
+                _emit({"error": "project_required", "message": "--run-id requires --project-id."})
+                return 2
+            result = store.get_run(
+                args.project_id, args.run_id, include_content=args.include_content
+            )
+            if result is None:
+                _emit({"error": "run_not_found", "project_id": args.project_id, "run_id": args.run_id})
+                return 1
+            _emit(result)
         elif args.runs:
             if not args.project_id:
                 _emit({"error": "project_required", "message": "--runs requires --project-id."})
