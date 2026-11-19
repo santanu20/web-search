@@ -26,6 +26,7 @@ def build_research_plan(
     verify_claims: bool = False,
     counter_evidence: bool = False,
     semantic_coverage: bool = False,
+    auto_crawl: bool = True,
     expected_independent_origins: int = 2,
 ) -> dict[str, Any]:
     """Create a deterministic graph describing the investigation to execute."""
@@ -44,8 +45,8 @@ def build_research_plan(
     if not facets_clean:
         facets_clean = [query] if query else ["Research objective"]
 
-    facet_budget = max(1.0, float(call_budget_s) * 0.65 / max(1, len(facets_clean)))
-    crawl_budget = max(0.0, float(call_budget_s) * 0.15)
+    facet_budget = max(0.0, float(call_budget_s) * 0.55 / max(1, len(facets_clean)))
+    crawl_budget = max(0.0, float(call_budget_s) * (0.15 if auto_crawl else 0.0))
     verification_budget = max(0.0, float(call_budget_s) * (0.10 if verify_claims else 0.0))
     counter_budget = max(0.0, float(call_budget_s) * (0.10 if counter_evidence else 0.0))
     tasks: list[dict[str, Any]] = [{
@@ -91,7 +92,9 @@ def build_research_plan(
         })
 
     crawl_id = _stable_id("task", normalized_query + "|site-crawl")
-    tasks.append({
+    crawl_id = _stable_id("task", normalized_query + "|site-crawl")
+    if auto_crawl:
+        tasks.append({
         "task_id": crawl_id,
         "kind": "source_deepening",
         "title": "Deepen evidence from high-value source domains",
@@ -110,7 +113,7 @@ def build_research_plan(
         "kind": "synthesis",
         "title": "Synthesize the evidence into a cited report",
         "question": query,
-        "dependencies": [*facet_task_ids, crawl_id],
+        "dependencies": [*facet_task_ids, *([crawl_id] if auto_crawl else [])],
         "status": "planned",
         "expected_outputs": ["cited findings", "limitations", "unresolved gaps"],
         "acceptance_criteria": ["Citations resolve to captured source records."],
@@ -238,7 +241,7 @@ def annotate_research_plan(
             if crawl_rows:
                 state = "complete" if fetched > 0 else "partial"
             else:
-                state = "complete" if synthesis else "planned"
+                state = "planned"
             observation = {"crawl_domains": len(crawl_rows), "pages_crawled": fetched}
         elif kind == "synthesis":
             state = "complete" if synthesis else "blocked"
