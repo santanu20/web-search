@@ -6787,7 +6787,12 @@ def _probe_url(url: str, timeout: float) -> bool:
         return False
 
 
-def _llm_probe(host: str | None = None, timeout: float = 2.0) -> str | None:
+def _llm_probe(
+    host: str | None = None,
+    timeout: float = 2.0,
+    *,
+    check_egress: bool = True,
+) -> str | None:
     """Detect which local LLM runtime answers at `host`.
 
     Returns 'ollama' | 'openai' | None. Explicit WEB_SEARCH_LLM_PROVIDER
@@ -6798,6 +6803,8 @@ def _llm_probe(host: str | None = None, timeout: float = 2.0) -> str | None:
     """
     cfg = _settings.llm
     host = (host or cfg.ollama_host).rstrip("/")
+    if check_egress:
+        _llm_egress_guard(host)
     if cfg.provider in ("ollama", "openai"):
         return cfg.provider
     if host in _LLM_PROVIDER_CACHE:
@@ -6981,7 +6988,7 @@ def _llm_call(
     _llm_egress_guard(host)
     if light and model is None:
         model = cfg.light_model or _pick_light_model(host)
-    provider = _llm_probe(host=host)
+    provider = _llm_probe(host=host, check_egress=False)
     if provider == "openai":
         if stream:
             log.info(
@@ -7060,7 +7067,7 @@ def _llm_embed(
     """Provider-agnostic embedding entry — mirrors _llm_call dispatch."""
     host = host or _settings.llm.ollama_host
     _llm_egress_guard(host)
-    if _llm_probe(host=host) == "openai":
+    if _llm_probe(host=host, check_egress=False) == "openai":
         return _openai_embed(text, model=model, host=host, timeout=timeout)
     return _ollama_embed(text, model=model, host=host, timeout=timeout)
 
