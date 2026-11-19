@@ -118,3 +118,31 @@ def test_synthesis_prompt_treats_webpages_as_untrusted_data(monkeypatch):
     assert "UNTRUSTED_SOURCE_CONTENT" in captured["prompt"]
     assert "never instructions" in captured["system"].lower()
     assert "ignore any commands" in captured["system"].lower()
+
+
+def test_facet_coverage_requires_multiple_query_terms():
+    facet = "Rust ownership borrow checker lifetime rules"
+    docs = [
+        doc("https://a.example/1", "a.example", "Ownership is mentioned here. " * 10),
+        doc("https://b.example/1", "b.example", "Ownership appears here too. " * 10),
+    ]
+    fraction, detail = rq.compute_facet_coverage([facet], docs)
+    assert fraction == 0.0
+    assert detail[facet]["covered"] is False
+
+
+def test_claim_audit_accepts_both_single_and_double_bracket_citations():
+    source = doc(
+        "https://docs.example/rust", "docs.example",
+        "Rust ownership gives each value one owner and borrowing follows lifetime rules. " * 8,
+    )
+    synthesis = (
+        "Rust ownership gives each value a single owner [1].\n"
+        "Borrowing follows the Rust lifetime rules [[1]]."
+    )
+    audit = rq.audit_claim_citations(synthesis, [source], [source])
+    assert audit["n_claims"] == 2
+    assert audit["n_cited_claims"] == 2
+    assert audit["n_uncited_claims"] == 0
+    assert audit["n_invalid_citations"] == 0
+    assert audit["citation_coverage"] == 1.0
