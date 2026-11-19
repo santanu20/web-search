@@ -9738,16 +9738,6 @@ def _dispatch(args) -> int:
         _build_parser().print_help(sys.stderr)
         return 1
 
-    # Import ddgs + cache its exception types module-level (used by _do_search
-    # via _RatelimitException / _TimeoutException / _DDGSException globals).
-    DDGS, *_ = _import_ddgs()
-
-    # F-63: reload learned rate + open circuits from the last clean exit, and
-    # persist again on the way out (atexit runs on sys.exit incl. 130 path).
-    if DEFAULT_PERSIST_STATE:
-        _restore_runtime_state()
-        atexit.register(_save_runtime_state)
-
     if args.cmd == "projects":
         store = ResearchStore(path=args.db)
         if args.delete:
@@ -9778,6 +9768,17 @@ def _dispatch(args) -> int:
         else:
             _emit(store.list_projects(args.project_id))
         return 0
+
+
+    # Import ddgs + cache its exception types module-level (used by _do_search
+    # via _RatelimitException / _TimeoutException / _DDGSException globals).
+    DDGS, *_ = _import_ddgs()
+
+    # F-63: reload learned rate + open circuits from the last clean exit, and
+    # persist again on the way out (atexit runs on sys.exit incl. 130 path).
+    if DEFAULT_PERSIST_STATE:
+        _restore_runtime_state()
+        atexit.register(_save_runtime_state)
 
     if args.cmd == "backends":
         try:
