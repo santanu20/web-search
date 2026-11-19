@@ -76,7 +76,7 @@ def test_unit__llm_call__light_uses_configured_light_model(monkeypatch):
 
     cfg = dataclasses.replace(ws._settings, llm=_settings_with(light_model="small:1b"))
     monkeypatch.setattr(ws, "_settings", cfg)
-    monkeypatch.setattr(ws, "_llm_probe", lambda host=None: "ollama")
+    monkeypatch.setattr(ws, "_llm_probe", lambda host=None, **kwargs: "ollama")
     probe_calls = []
     monkeypatch.setattr(
         ws,
@@ -100,7 +100,7 @@ def test_unit__llm_call__main_stage_unaffected_without_light(monkeypatch):
 
     cfg = dataclasses.replace(ws._settings, llm=_settings_with())
     monkeypatch.setattr(ws, "_settings", cfg)
-    monkeypatch.setattr(ws, "_llm_probe", lambda host=None: "ollama")
+    monkeypatch.setattr(ws, "_llm_probe", lambda host=None, **kwargs: "ollama")
     monkeypatch.setattr(
         ws,
         "_pick_light_model",
