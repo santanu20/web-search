@@ -152,3 +152,28 @@ def test_unit__bench_append__writes_jsonl_with_run_metadata(
     assert rec["grounded_rate"] == 1.0
     assert rec["n_sources"] == 7
     assert "ts" in rec
+
+
+def test_unit__verdict__reports_facet_citation_diversity_and_latency_percentiles():
+    rows = [
+        {
+            "ok": True, "grounded_rate": 0.8, "term_coverage": 1.0,
+            "facet_coverage": 0.75, "citation_coverage": 0.9,
+            "uncited_claims": 1, "invalid_citations": 0,
+            "unique_domains": 4, "latency_s": 10.0,
+        },
+        {
+            "ok": True, "grounded_rate": 1.0, "term_coverage": 0.8,
+            "facet_coverage": 1.0, "citation_coverage": 0.8,
+            "uncited_claims": 0, "invalid_citations": 1,
+            "unique_domains": 6, "latency_s": 30.0,
+        },
+    ]
+    summary = eval_answers.verdict(rows, min_success=1.0, min_grounded=0.5)
+    assert summary["facet_coverage_agg"] == 0.88
+    assert summary["citation_coverage_agg"] == 0.85
+    assert summary["uncited_claims_total"] == 1
+    assert summary["invalid_citations_total"] == 1
+    assert summary["unique_domains_mean"] == 5.0
+    assert summary["latency_s_p50"] == 20.0
+    assert summary["latency_s_p95"] == 10.0 or summary["latency_s_p95"] == 30.0
