@@ -24,7 +24,8 @@ Two ways to use it:
 | Full-page reading | trafilatura / readability / html2text extraction, not link lists |
 | LLM answers (optional) | Local Ollama or any OpenAI-compatible endpoint; `--use-llm` |
 | Evidence windows | The LLM reads the passages that match your query, not the first 4,000 chars of each page |
-| Quote-grounded citations | Every quote in the answer is verified against page content; inline `[n]` markers resolve to real sources |
+| Quote-grounded citations | Inline `[n]` markers resolve to real sources and model-provided source quotes are checked against extracted content |
+| Claim-level audit (opt-in) | `--verify-claims` assesses each cited factual claim and rejects evidence quotes absent from the cited source snapshot |
 | Smart model routing | A small model handles query decomposition / reranking; the big model only synthesizes — CPU-friendly |
 | Keyless | No API keys for any of it. Local models optional. |
 
@@ -82,7 +83,7 @@ same CLI shown above — there is no second API to learn.
 query ─> decompose (small model) ─> search 8+ backends ─> extract pages
       ─> rank ─> evidence windows (query-matched passages)
       ─> synthesis (main model, Ollama or OpenAI-compatible)
-      ─> quote grounding ─> one JSON doc (synthesis + citations + coverage)
+      ─> quote grounding ─> optional claim audit ─> one JSON doc
 ```
 
 Measured on this exact flow (2026-10-07, live network, qwen3.5:9b on 24-core
@@ -90,6 +91,18 @@ CPU, 9 runs across 3 questions): **90% ± 14 of quoted citations grounded** in
 source pages, ~20-30 sources per run, ~6-7 min per question with thinking on.
 Passage-window evidence beat plain head-truncation in a controlled A/B (higher
 grounded rate, tighter spread, no latency cost).
+
+Optional claim-level audit (one additional model call):
+
+```bash
+.venv/bin/python web_search.py pro "how do ETFs create and redeem shares" --use-llm --verify-claims
+```
+
+The JSON response includes `claim_audit[]` and `claim_audit_summary`. The
+audit checks whether each sentence-sized claim is supported by a verbatim span
+in a source cited by that claim. It is model-assisted entailment assessment,
+not formal proof or calibrated factual confidence; see
+[`docs/CLAIM_EVIDENCE_AUDIT.md`](docs/CLAIM_EVIDENCE_AUDIT.md).
 
 ## Configuration
 
