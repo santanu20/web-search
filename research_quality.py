@@ -2,12 +2,17 @@
 from __future__ import annotations
 import math
 import re
+from collections import defaultdict
 from typing import Any
 
 STOP = set("a an and are as at be been between by can could did do does for from had has have how in into is it its more most of on or our should so than that the their them then there these this those to was we were what when where which who why will with would".split())
 
 def terms(text: str) -> set[str]:
     return {x.lower() for x in re.findall(r"[a-zA-Z0-9][a-zA-Z0-9.+#-]*", str(text or "")) if len(x) > 1 and x.lower() not in STOP}
+
+
+# Backward-compatible descriptive name used by the main search pipeline.
+tokenize_terms = terms
 
 def build_research_facets(query: str, max_facets: int = 6) -> list[str]:
     q = " ".join(str(query or "").split())
