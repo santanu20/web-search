@@ -18,7 +18,7 @@ def _record(content="A source describes battery recycling regulations and licens
 
 
 def _payload(content=None, status="supported", query="battery recycling regulations"):
-    url, source_id, extracted = _record(content or None)
+    url, source_id, extracted = _record() if content is None else _record(content)
     return {
         "query": query,
         "mode": "llm",
