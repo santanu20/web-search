@@ -132,3 +132,34 @@ def test_pinned_proxy_enforces_aggregate_byte_budget():
         assert server.last_budget_error.budget == "MAX_BROWSER_PROXY_BYTES"
     finally:
         server.server_close()
+
+
+
+def test_pinned_connect_proxy_formats_ipv6_authority_for_resolver():
+    calls = []
+
+    class Resolver:
+        def resolve_and_validate(self, url):
+            calls.append(url)
+            raise ws.SSRFBlocked(url, "test rejection", ["::1"])
+
+    proxy = ws._PinnedConnectProxy(Resolver())
+    proxy.start()
+    try:
+        with socket.create_connection(("127.0.0.1", proxy.server.server_address[1]), timeout=3) as client:
+            client.settimeout(3)
+            client.sendall(
+                b"CONNECT [2001:db8::1]:8443 HTTP/1.1\r\n"
+                b"Host: [2001:db8::1]:8443\r\n\r\n"
+            )
+            response = _read_proxy_response(client)
+            assert response.startswith(b"HTTP/1.1 403 Destination Blocked")
+        assert calls == ["https://[2001:db8::1]:8443/"]
+    finally:
+        proxy.close()
+
+
+def test_pinned_proxy_args_disable_chromium_loopback_bypass():
+    args = ws._pinned_proxy_chromium_args()
+    assert "--proxy-bypass-list=<-loopback>" in args
+    assert "--no-sandbox" in args
