@@ -451,6 +451,34 @@ uv run python $SCRIPT pro "kubernetes pod security" --use-llm \
 
 ```
 
+### Persistent research projects
+
+The Pro command can save runs into a local SQLite workspace:
+
+```bash
+uv run python $SCRIPT pro "Indian EV battery market" --use-llm --counter-evidence \
+    --project indian-ev-battery
+
+# List projects and inspect history
+uv run python $SCRIPT projects
+uv run python $SCRIPT projects --project-id indian-ev-battery --runs 10
+
+# Retrieve a run; add --include-content to include captured source text
+uv run python $SCRIPT projects --project-id indian-ev-battery --run-id RUN_ID
+
+# Delete project history and stored evidence (explicit confirmation required)
+uv run python $SCRIPT projects --project-id indian-ev-battery --delete --yes
+```
+
+`--research-db PATH` or `WEB_SEARCH_RESEARCH_DB` overrides the default
+`~/.cache/web-search/research.db`. The database stores up to 100 sources per
+run and 100,000 characters per source. Each source snapshot is content-hashed.
+Repeated runs on the same normalized query report new URLs, changed content
+snapshots, newly observed claims and claim-status transitions. Claim deltas
+are skipped when the query changes. This is local persistence, not multi-tenant
+isolation or encryption at rest.
+
+### Research coverage matrix
 ### Research coverage matrix
 
 The Pro response includes `research_coverage` and `coverage_matrix[]`. Each
