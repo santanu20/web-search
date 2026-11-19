@@ -13,11 +13,11 @@ from collections import Counter, defaultdict
 from typing import Any, Iterable
 from urllib.parse import urlsplit
 
-from research_evidence import build_evidence_sources, normalize_text
+from research_evidence import build_evidence_sources, normalize_text, normalize_url
 
 _COMPOUND_SUFFIXES = frozenset({
     "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au",
-    "co.in", "firm.in", "net.in", "org.in", "gen.in", "ind.in",
+    "co.in", "firm.in", "net.in", "org.in", "gen.in", "ind.in", "gov.in", "ac.in", "nic.in",
     "com.br", "com.cn", "com.sg", "co.jp", "co.nz", "com.mx",
 })
 _STOPWORDS = frozenset({
@@ -90,7 +90,15 @@ def _source_type(title: str, url: str, content: str) -> tuple[str, list[str], bo
         primary = official_gov or any(x in host for x in ("sec.gov", "rbi.org.in", "sebi.gov.in"))
     if _RE_ANNUAL.search(title + " " + path):
         signals.append("corporate_or_financial_report")
-        primary = True
+        official_report_path = (
+            "/investor" in path or "/annual-report" in path
+            or "/annual_report" in path or "/filings/" in path
+            or host.startswith(("ir.", "investor.", "investors."))
+            or bool(re.search(r"/(10-k|10-q|20-f)(/|$)", path))
+        )
+        if official_report_path:
+            signals.append("official_investor_or_filing_path")
+            primary = True
         source_type = "financial_filing_or_report"
     elif _RE_PRESS.search(title + " " + content[:1200]):
         signals.append("publisher_press_release")
@@ -187,7 +195,7 @@ def analyze_sources(
     for item in sources:
         url = str(item.get("url") or item.get("href") or "")
         if url:
-            meta_by_url[url] = dict(item)
+            meta_by_url[normalize_url(url)] = dict(item)
 
     profiles: list[dict[str, Any]] = []
     shingles_by_id: dict[str, set[tuple[str, ...]]] = {}
