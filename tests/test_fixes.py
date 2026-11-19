@@ -1219,7 +1219,7 @@ def test_llm_call_dispatch_routes_to_openai_worker(monkeypatch):
     monkeypatch.setenv("WEB_SEARCH_LLM_PROVIDER", "openai")
     calls = {"probe": 0, "worker": 0}
 
-    def fake_probe(host=None, timeout=2.0):
+    def fake_probe(host=None, timeout=2.0, **kwargs):
         calls["probe"] += 1
         return "openai"
 
@@ -1250,7 +1250,7 @@ def test_llm_call_dispatch_routes_to_ollama_worker(monkeypatch):
 
 
 def test_llm_call_dispatch_raises_when_no_runtime(monkeypatch):
-    monkeypatch.setattr(ws, "_llm_probe", lambda host=None, timeout=2.0: None)
+    monkeypatch.setattr(ws, "_llm_probe", lambda host=None, timeout=2.0, **kwargs: None)
     with pytest.raises(ws.OllamaUnavailable):
         ws._llm_call("ping")
 
