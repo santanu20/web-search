@@ -54,6 +54,19 @@ computed separately so a changed page snapshot can be distinguished from the
 same source identity. Original source order is preserved, including entries
 whose extraction failed, so citation numbers cannot silently shift.
 
+## Independent counter-evidence
+
+Use `--counter-evidence` to imply `--verify-claims` and add a bounded search
+pass for up to eight cited claims. The engine searches for URLs not already
+used in the investigation, extracts candidate pages, and associates relevant
+results with their matching claims. Same-host candidates are excluded relative
+to the claim's original cited sources.
+
+The verifier receives original cited material and separately labeled
+counter-evidence. Accepted evidence records expose `source_role` so downstream
+consumers can distinguish original citations from newly discovered material.
+A supporting span plus a contradictory span is classified as `mixed`.
+
 ## Limitations
 
 This is a model-assisted entailment assessment with server-side quote-span
