@@ -93,10 +93,11 @@ grounded rate, tighter spread, no latency cost).
 
 ## Configuration
 
-Model and behavior are env-configurable: `WEB_SEARCH_LLM_MODEL`,
-`WEB_SEARCH_LLM_LIGHT_MODEL`, `WEB_SEARCH_EVIDENCE_MODE` (`head` restores
-legacy first-4,000-chars evidence), provider host/port. Full table in
-`SKILL.md`.
+Model, egress and security behavior are env-configurable: `WEB_SEARCH_LLM_MODEL`,
+`WEB_SEARCH_LLM_EGRESS_POLICY` (`warn`, `local_only`, `allowlist`),
+`WEB_SEARCH_LLM_ALLOWED_HOSTS`, and the two-part trusted-private-host opt-in
+(`WEB_SEARCH_TRUSTED_HOSTS` + `WEB_SEARCH_TRUSTED_HOSTS_ALLOW_PRIVATE=1)).
+Full settings table in `SKILL.md`.
 
 ## Tests
 
