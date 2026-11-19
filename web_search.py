@@ -58,6 +58,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from source_intelligence import analyze_sources
+from research_coverage import build_coverage_matrix
 
 from research_evidence import (
     assign_counter_evidence,
@@ -8149,6 +8150,12 @@ def _pro_search(
     # and domain-tier heuristics. Group same publishers and near-duplicate
     # syndicated pages so repeated copies are not counted as independent evidence.
     source_intelligence = analyze_sources(sources, all_extracted, max_sources=50)
+    research_coverage = build_coverage_matrix(
+        sub_queries,
+        all_extracted,
+        source_intelligence["sources"],
+        original_query=query,
+    )
 
     # Final coverage (keyword + optional semantic) + confidence
     cov_frac, cov_map = _compute_pro_coverage(query_terms, all_extracted)
@@ -8343,6 +8350,8 @@ def _pro_search(
         "source_intelligence": source_intelligence["summary"],
         "source_profiles": source_intelligence["sources"],
         "source_duplicate_pairs": source_intelligence["duplicate_pairs"],
+        "research_coverage": research_coverage["summary"],
+        "coverage_matrix": research_coverage["facets"],
         "results": all_results,
         "meta": {
             "pages_fetched": len(all_results),
