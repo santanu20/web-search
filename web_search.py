@@ -60,6 +60,7 @@ from typing import Any, Protocol
 from source_intelligence import analyze_sources
 from research_coverage import build_coverage_matrix
 from research_store import ResearchStore
+from research_temporal import build_temporal_timeline
 from research_plan import annotate_research_plan, build_research_plan
 
 from research_evidence import (
@@ -8118,7 +8119,13 @@ def _pro_search(
         all_results = _bm25_rerank(all_results, query)
         all_results = _diversify(all_results, _settings.agentic.max_per_domain)
 
-    # Build key_findings + sources
+    # Build key_findings + sources. Preserve search-result date metadata rather
+    # than deriving all temporal facts from page text alone.
+    result_meta_by_url = {
+        canonicalize_url(str(r.get("canonical_url") or r.get("href") or r.get("url") or "")): r
+        for r in all_results
+        if r.get("canonical_url") or r.get("href") or r.get("url")
+    }
     key_findings: list[dict[str, Any]] = []
     sources: list[dict[str, Any]] = []
     seen_src: set[str] = set()
@@ -8141,12 +8148,16 @@ def _pro_search(
             )
         if url and url not in seen_src:
             seen_src.add(url)
+            result_meta = result_meta_by_url.get(canonicalize_url(url), {})
             sources.append(
                 {
                     "url": url,
                     "title": e.get("title", ""),
                     "host": e.get("host", ""),
                     "tier": e.get("tier", 3),
+                    "date": result_meta.get("date") or e.get("date"),
+                    "published": result_meta.get("published") or e.get("published"),
+                    "updated": result_meta.get("updated") or e.get("updated"),
                 }
             )
 
@@ -8154,6 +8165,9 @@ def _pro_search(
     # and domain-tier heuristics. Group same publishers and near-duplicate
     # syndicated pages so repeated copies are not counted as independent evidence.
     source_intelligence = analyze_sources(sources, all_extracted, max_sources=50)
+    temporal_timeline = build_temporal_timeline(
+        sources, all_extracted, all_results, max_sources=100
+    )
     research_coverage = build_coverage_matrix(
         sub_queries,
         all_extracted,
@@ -8376,6 +8390,9 @@ def _pro_search(
         "source_intelligence": source_intelligence["summary"],
         "source_profiles": source_intelligence["sources"],
         "source_duplicate_pairs": source_intelligence["duplicate_pairs"],
+        "temporal_timeline": temporal_timeline["summary"],
+        "temporal_sources": temporal_timeline["sources"],
+        "timeline_events": temporal_timeline["events"],
         "research_coverage": research_coverage["summary"],
         "coverage_matrix": research_coverage["facets"],
         "research_plan": research_plan,
