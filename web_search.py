@@ -498,6 +498,8 @@ class LlmSettings:
     think_default: bool  # enable chain-of-thought by default (WEB_SEARCH_LLM_THINK)
     provider: str = "auto"  # auto | ollama | openai (WEB_SEARCH_LLM_PROVIDER)
     light_model: str = ""  # small model for routing stages (WEB_SEARCH_LLM_LIGHT_MODEL; empty = auto-pick)
+    egress_policy: str = "warn"  # warn | local_only | allowlist
+    allowed_hosts: tuple[str, ...] = ()  # exact remote model hosts explicitly approved by operator
 
 
 # WS8: rate/politeness presets. WEB_SEARCH_PROFILE selects the DEFAULT for
@@ -585,6 +587,20 @@ class Settings:
             )
         preset = _PROFILE_PRESETS[profile]
         proxy = os.environ.get("WEB_SEARCH_PROXY") or os.environ.get("DDGS_PROXY")
+        llm_egress_policy = _env("WEB_SEARCH_LLM_EGRESS_POLICY", "warn").strip().lower()
+        if llm_egress_policy not in {"warn", "local_only", "allowlist"}:
+            raise ValueError(
+                "WEB_SEARCH_LLM_EGRESS_POLICY must be one of: warn, local_only, allowlist"
+            )
+        llm_allowed_hosts = tuple(
+            sorted(
+                {
+                    h.strip().lower().rstrip(".")
+                    for h in _env("WEB_SEARCH_LLM_ALLOWED_HOSTS", "").split(",")
+                    if h.strip()
+                }
+            )
+        )
         cache_dir = Path(
             _env("WEB_SEARCH_CACHE_DIR", str(Path.home() / ".cache" / "web-search"))
         )
@@ -673,6 +689,8 @@ class Settings:
                 think_default=_env_bool("WEB_SEARCH_LLM_THINK", True),
                 provider=_env("WEB_SEARCH_LLM_PROVIDER", "auto").lower(),
                 light_model=_env("WEB_SEARCH_LLM_LIGHT_MODEL", ""),
+                egress_policy=llm_egress_policy,
+                allowed_hosts=llm_allowed_hosts,
             ),
             call_budget=_env_float("WEB_SEARCH_CALL_BUDGET", 600.0),
             concurrency=_env_int("WEB_SEARCH_CONCURRENCY", 3),
@@ -1079,13 +1097,21 @@ class SafeURLResolver:
         trusted_hosts: set[str] | None = None,
         dns_ttl: float = 60.0,
         resolve_timeout: float = 5.0,
+        allow_trusted_private_hosts: bool = False,
     ) -> None:
-        self._trusted = {
-            h.lower()
+        configured_trusted = {
+            h.lower().rstrip(".")
             for h in (trusted_hosts or set()) - _METADATA_HOSTS
-            for h in [h.lower()]
+            for h in [h.lower().rstrip(".")]
             if h
         }
+        # A hostname allowlist alone is not enough to authorize private network
+        # access. Require a second, explicit opt-in for that security exception.
+        self._trusted = (
+            configured_trusted if allow_trusted_private_hosts else set()
+        )
+        self._allow_trusted_private_hosts = allow_trusted_private_hosts
+        self._configured_trusted = configured_trusted
         from collections import OrderedDict
 
         self._dns_cache: OrderedDict[str, tuple[float, tuple[str, ...]]] = OrderedDict()
@@ -1212,15 +1238,29 @@ _resolver_lock = threading.Lock()
 
 
 def get_safe_url_resolver() -> SafeURLResolver:
-    """Lazy singleton — trusted hosts from WEB_SEARCH_TRUSTED_HOSTS env
-    (comma-separated). Metadata hosts always blocked regardless."""
+    """Lazy singleton for URL policy.
+
+    WEB_SEARCH_TRUSTED_HOSTS lists exact hostnames; it does not authorize
+    private addresses unless WEB_SEARCH_TRUSTED_HOSTS_ALLOW_PRIVATE=1 is also
+    explicitly set. Metadata endpoints remain unconditionally blocked.
+    """
     global _resolver_instance
     if _resolver_instance is None:
         with _resolver_lock:
             if _resolver_instance is None:
                 raw = os.environ.get("WEB_SEARCH_TRUSTED_HOSTS", "")
-                trusted = {h.strip().lower() for h in raw.split(",") if h.strip()}
-                _resolver_instance = SafeURLResolver(trusted_hosts=trusted)
+                trusted = {h.strip().lower().rstrip(".") for h in raw.split(",") if h.strip()}
+                allow_private = _env_bool("WEB_SEARCH_TRUSTED_HOSTS_ALLOW_PRIVATE", False)
+                _resolver_instance = SafeURLResolver(
+                    trusted_hosts=trusted,
+                    allow_trusted_private_hosts=allow_private,
+                )
+                if allow_private and trusted:
+                    log.warning(
+                        "ssrf_trusted_private_hosts_enabled",
+                        hosts=sorted(_resolver_instance._trusted),
+                        note="private-IP access is an explicit trusted-host exception",
+                    )
     return _resolver_instance
 
 
@@ -6775,13 +6815,35 @@ def _llm_probe(host: str | None = None, timeout: float = 2.0) -> str | None:
 
 
 def _llm_egress_guard(host: str) -> None:
-    """Provider-agnostic §7g guard: warn when the LLM host is off-machine."""
+    """Apply the configured LLM data-egress policy before sending prompts."""
+    cfg = _settings.llm
     parsed = urlparse(host)
-    if parsed.hostname not in ("localhost", "127.0.0.1", "::1", None, ""):
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    if not hostname:
+        raise OllamaUnavailable(f"Invalid LLM endpoint URL: {host!r}")
+
+    is_local = hostname == "localhost" or hostname.endswith(".localhost")
+    try:
+        is_local = is_local or ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        pass
+
+    policy = cfg.egress_policy
+    if policy == "local_only" and not is_local:
+        raise OllamaUnavailable(
+            f"LLM egress blocked by WEB_SEARCH_LLM_EGRESS_POLICY=local_only: "
+            f"{hostname}. Use a loopback endpoint or explicitly choose a less "
+            "restrictive policy."
+        )
+    if policy == "allowlist" and not is_local and hostname not in cfg.allowed_hosts:
+        raise OllamaUnavailable(
+            f"LLM egress blocked: {hostname} is not in WEB_SEARCH_LLM_ALLOWED_HOSTS."
+        )
+    if policy == "warn" and not is_local:
         log.warning(
             "llm_egress_nonlocal",
-            host=parsed.hostname,
-            note="LLM host off-machine — data egress risk (§7g)",
+            host=hostname,
+            note="LLM host off-machine; prompts and extracted evidence may leave this machine",
         )
 
 
