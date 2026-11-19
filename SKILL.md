@@ -451,6 +451,26 @@ uv run python $SCRIPT pro "kubernetes pod security" --use-llm \
 
 ```
 
+### Research task graph
+
+Every Pro result includes <code>research_plan</code> (schema
+<code>research.plan.v1</code>). It contains the objective, stable plan/task IDs,
+facet retrieval tasks, dependencies, expected evidence outputs, acceptance
+criteria and per-stage budget allocations. After execution, task states are
+annotated from observed results:
+
+| State | Meaning |
+|---|---|
+| <code>complete</code> | Stage ran and its acceptance signals were observed |
+| <code>partial</code> | Some evidence exists, but required coverage or corroboration is missing |
+| <code>blocked</code> | No relevant evidence or an execution/budget failure prevented completion |
+| <code>planned</code> | The stage was not observed to run |
+
+The plan does not imply that decomposed facets are exhaustive or that a
+completed task proves factual correctness. Inspect <code>coverage_matrix[]</code>
+and <code>claim_audit[]</code> for the evidence behind task status. The plan is
+also saved with each project run when <code>--project</code> is used.
+
 ### Persistent research projects
 
 The Pro command can save runs into a local SQLite workspace:
@@ -478,7 +498,6 @@ snapshots, newly observed claims and claim-status transitions. Claim deltas
 are skipped when the query changes. This is local persistence, not multi-tenant
 isolation or encryption at rest.
 
-### Research coverage matrix
 ### Research coverage matrix
 
 The Pro response includes `research_coverage` and `coverage_matrix[]`. Each
@@ -547,7 +566,15 @@ factual confidence or proof that a research topic is complete.
      "publisher_count":2, "independent_origin_count":1,
      "primary_source_candidate_count":1,
      "recommended_query":"original query market size trends primary sources independent evidence",
-     "evidence":[{"url":"...","excerpt":"...","independence_cluster_id":"..."}]}]
+     "evidence":[{"url":"...","excerpt":"...","independence_cluster_id":"..."}]}],
+  "research_plan": {"schema":"research.plan.v1", "plan_id":"...",
+     "status":"partial", "task_count":6,
+     "task_status_counts":{"complete":2,"partial":2,"blocked":0,"planned":2},
+     "completed_task_ratio":0.333,
+     "tasks":[{"task_id":"...", "kind":"evidence_retrieval", "facet":"market size",
+       "dependencies":["..."], "status":"partial",
+       "acceptance_criteria":["At least 50% of facet terms appear in extracted evidence."],
+       "budget_seconds":16.5, "result":{"missing_terms":["trends"]}}]}
 }
 ```
 
@@ -559,6 +586,7 @@ factual confidence or proof that a research topic is complete.
 - **Quote grounding (WS5)**: the LLM must append a `SOURCES:` section with one verbatim ≤40-word quote per cited source. Each quote is fuzzy-verified against the source's extracted content (exact substring → ratio 1.0; else sliding-window `difflib.SequenceMatcher`, floor 0.65). Verdicts surface in `citation_grounding[]` + `ungrounded_citations`. Ungrounded citations are **flagged, never removed** — the verifier reports, the agent judges.
 - **No fabrication instruction**: system prompt explicitly says "If evidence does not cover an aspect, say so explicitly."
 - **Counter-evidence discovery (opt-in)**: `--counter-evidence` implies `--verify-claims`, creates up to 8 contrary-evidence queries, searches for URLs not already used in the investigation, and attaches relevant results from different hosts to the matching claim. A different host does not prove organizational independence. Search and extraction consume the remaining research budget.
+- **Research task graph**: each run emits <code>research_plan</code> with stable plan/task IDs, objective/facet/deepening/synthesis/optional verification nodes, dependencies, expected outputs, acceptance criteria and budget allocations. Execution annotation distinguishes <code>complete</code>, <code>partial</code>, <code>blocked</code>, and <code>planned</code>; a planned task is never treated as completed research.
 - **Research coverage matrix**: Pro output includes `research_coverage` and per-facet `coverage_matrix[]`. A facet is covered only when its matched terms reach the threshold and evidence comes from at least two source-origin clusters; otherwise it is partial/gap. The output identifies missing terms, primary-source candidate counts, and recommended follow-up queries. This is a lexical sufficiency diagnostic, not a factual-confidence score.
 - **Source lineage and independence**: Pro output includes `source_intelligence`, per-source `source_profiles`, and `source_duplicate_pairs`. It groups same registrable publisher domains and flags exact/near-duplicate extracted content across different hosts. Source types and primary-source flags are explainable heuristics, not an authority score. Unknown public suffixes are host-scoped; different publisher groups still do not prove institutional independence.
 - **Claim-level audit (opt-in)**: `--verify-claims` performs one additional LLM pass over the sources already cited by each claim. A claim is marked `supported` only when the model judges it supported AND a verbatim evidence quote is found in that claim's cited source snapshot. Contradicting spans produce `contradicted` or `mixed`; absent/invalid spans produce `unverified`. This is model-assisted entailment checking, not formal proof or a calibrated confidence score. It does not independently discover contrary sources. Details: `docs/CLAIM_EVIDENCE_AUDIT.md`.
