@@ -489,7 +489,15 @@ uv run python $SCRIPT pro "kubernetes pod security" --use-llm \
   "ungrounded_citations": 1,
   "follow_ups": ["related question 1", ...],
   "key_findings": [{"url":"...", "passage":"...", "relevance": 0.8}],
-  "sources": [{"url":"...", "title":"...", "host":"...", "tier": 0}]
+  "sources": [{"url":"...", "title":"...", "host":"...", "tier": 0}],
+  "source_intelligence": {"source_count": 20, "publisher_count": 12,
+     "independence_cluster_count": 11, "duplicate_pair_count": 2,
+     "primary_source_candidates": 4, "classification_is_heuristic": true},
+  "source_profiles": [{"source_id":"...", "publisher_id":"...", "source_type":"news_reporting",
+     "primary_source_candidate":false, "independence_cluster_id":"...",
+     "duplicate_source_ids":[], "source_signals":["news_publisher_signal"]}],
+  "source_duplicate_pairs": [{"source_a":"...", "source_b":"...", "similarity":0.91,
+     "method":"near_duplicate_shingles"}]
 }
 ```
 
@@ -501,6 +509,7 @@ uv run python $SCRIPT pro "kubernetes pod security" --use-llm \
 - **Quote grounding (WS5)**: the LLM must append a `SOURCES:` section with one verbatim ≤40-word quote per cited source. Each quote is fuzzy-verified against the source's extracted content (exact substring → ratio 1.0; else sliding-window `difflib.SequenceMatcher`, floor 0.65). Verdicts surface in `citation_grounding[]` + `ungrounded_citations`. Ungrounded citations are **flagged, never removed** — the verifier reports, the agent judges.
 - **No fabrication instruction**: system prompt explicitly says "If evidence does not cover an aspect, say so explicitly."
 - **Counter-evidence discovery (opt-in)**: `--counter-evidence` implies `--verify-claims`, creates up to 8 contrary-evidence queries, searches for URLs not already used in the investigation, and attaches relevant results from different hosts to the matching claim. A different host does not prove organizational independence. Search and extraction consume the remaining research budget.
+- **Source lineage and independence**: Pro output includes `source_intelligence`, per-source `source_profiles`, and `source_duplicate_pairs`. It groups same registrable publisher domains and flags exact/near-duplicate extracted content across different hosts. Source types and primary-source flags are explainable heuristics, not an authority score. Unknown public suffixes are host-scoped; different publisher groups still do not prove institutional independence.
 - **Claim-level audit (opt-in)**: `--verify-claims` performs one additional LLM pass over the sources already cited by each claim. A claim is marked `supported` only when the model judges it supported AND a verbatim evidence quote is found in that claim's cited source snapshot. Contradicting spans produce `contradicted` or `mixed`; absent/invalid spans produce `unverified`. This is model-assisted entailment checking, not formal proof or a calibrated confidence score. It does not independently discover contrary sources. Details: `docs/CLAIM_EVIDENCE_AUDIT.md`.
 
 ### LLM config (no hardcoded models)
