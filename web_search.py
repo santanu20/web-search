@@ -6977,9 +6977,10 @@ def _llm_call(
     and other heavy stages stay on the main model (P0-3)."""
     cfg = _settings.llm
     host = host or cfg.ollama_host
+    # Enforce egress policy before model discovery or any outbound probe.
+    _llm_egress_guard(host)
     if light and model is None:
         model = cfg.light_model or _pick_light_model(host)
-    _llm_egress_guard(host)
     provider = _llm_probe(host=host)
     if provider == "openai":
         if stream:
