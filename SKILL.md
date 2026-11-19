@@ -405,7 +405,7 @@ uv run python $SCRIPT pro "kubernetes pod security" --use-llm \
 
 ### Pipeline
 
-\`\`\`
+```
 1. RESEARCH PLAN
    heuristic: original question + question-type-aware facets (comparison,
               mechanism, policy, evidence, counterarguments, limitations)
@@ -431,7 +431,7 @@ uv run python $SCRIPT pro "kubernetes pod security" --use-llm \
               SOURCES section of verbatim quotes for quote-grounding checks
    all modes: report claim-level citation presence, out-of-range references,
               and lexical overlap diagnostics
-\`\`\`
+```
 
 A crawl reserve of up to 20% of the configured call budget is retained when
 auto-crawl is enabled. The total orchestration deadline is not extended to
