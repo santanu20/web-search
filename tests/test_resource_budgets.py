@@ -123,6 +123,9 @@ def test_crawl_final_page_is_clipped_to_remaining_byte_budget(monkeypatch):
         def incr(self, name):
             return None
 
+        def snapshot(self):
+            return {}
+
     monkeypatch.setattr(ws, "get_safe_url_resolver", lambda: Resolver())
     monkeypatch.setattr(ws, "_fetch_robots_txt", lambda origin: None)
     monkeypatch.setattr(ws, "_fetch_sitemap_locs", lambda *a, **k: [])
