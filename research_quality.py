@@ -183,14 +183,14 @@ def audit_claim_citations(synthesis: str, sources: list[dict[str, Any]], extract
     claims = []
     body = str(synthesis or "").split("SOURCES:", 1)[0]
     for raw in body.splitlines():
-        line = re.sub(r"^\\s*(?:#{1,6}\\s*|[-*+]\\s*|\\d+[.)]\\s*)", "", raw).strip()
+        line = re.sub(r"^\s*(?:#{1,6}\s*|[-*+]\s*|\d+[.)]\s*), "", raw).strip()
         if not line or line.lower().startswith(("coverage", "uncovered", "no substantive evidence")):
             continue
-        for sentence in re.split(r"(?<=[.!?])\\s+(?=[A-Z0-9])", line):
+        for sentence in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])", line):
             sentence = sentence.strip()
             if len(sentence) < 30:
                 continue
-            ids = sorted({int(n) for n in re.findall(r"\\[(\\d+)\\]", sentence)})
+            ids = sorted({int(n) for n in re.findall(r"\[(\d+)\]", sentence)})
             if not ids:
                 claims.append({"text": sentence[:300], "citation_indices": [], "valid_citations": [], "invalid_citations": [], "lexical_overlap": None, "status": "uncited"})
                 continue
