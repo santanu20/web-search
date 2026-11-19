@@ -49,6 +49,14 @@ class ResearchStore:
     def __init__(self, path: str | Path | None = None) -> None:
         self.path = Path(path or os.environ.get("WEB_SEARCH_RESEARCH_DB") or DEFAULT_DB_PATH).expanduser()
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            if not self.path.exists():
+                descriptor = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                os.close(descriptor)
+            else:
+                os.chmod(self.path, 0o600)
+        except FileExistsError:
+            pass
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
@@ -331,7 +339,6 @@ class ResearchStore:
                         ),
                     )
 
-            current_source_hashes = {item["source_id"]: item["content_hash"] for item in sources}
             diff: dict[str, Any] = {
                 "compared_to_run_id": previous_run_id,
                 "same_query": same_query,
