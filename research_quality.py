@@ -1,5 +1,6 @@
 """Research quality helpers."""
 from __future__ import annotations
+import math
 import re
 from typing import Any
 
@@ -45,13 +46,16 @@ def _host(item: dict[str, Any]) -> str:
     if host:
         return host
     from urllib.parse import urlsplit
-    return (urlsplit(str(item.get("url") or item.get("href") or "")).hostname or "").lower().removeprefix("www.")
+    try:
+        return (urlsplit(str(item.get("url") or item.get("href") or "")).hostname or "").lower().removeprefix("www.")
+    except ValueError:
+        return ""
 
 def compute_facet_coverage(facets: list[str], extracted: list[dict[str, Any]], min_domains: int = 2):
     detail = {}
     for facet in facets:
         wanted = terms(facet)
-        required = max(1, min(3, round(len(wanted) * 0.25)))
+        required = max(1, min(4, math.ceil(len(wanted) * 0.4)))
         domains, urls, matched = set(), set(), set()
         for e in extracted:
             url = str(e.get("url") or e.get("href") or "")
@@ -190,7 +194,7 @@ def audit_claim_citations(synthesis: str, sources: list[dict[str, Any]], extract
             sentence = sentence.strip()
             if len(sentence) < 30:
                 continue
-            ids = sorted({int(n) for n in re.findall(r"\[(\d+)\]", sentence)})
+            ids = sorted({int(n) for n in re.findall(r"\[\[?(\d+)\]\]?", sentence)})
             if not ids:
                 claims.append({"text": sentence[:300], "citation_indices": [], "valid_citations": [], "invalid_citations": [], "lexical_overlap": None, "status": "uncited"})
                 continue
