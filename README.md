@@ -23,10 +23,12 @@ Two ways to use it:
 | Bot-block bypass | Browser-impersonating fetch layer keeps results flowing where plain HTTP gets blocked |
 | Full-page reading | trafilatura / readability / html2text extraction, not link lists |
 | LLM answers (optional) | Local Ollama or any OpenAI-compatible endpoint; `--use-llm` |
-| Evidence windows | The LLM reads the passages that match your query, not the first 4,000 chars of each page |
-| Quote-grounded citations | Every quote in the answer is verified against page content; inline `[n]` markers resolve to real sources |
-| Smart model routing | A small model handles query decomposition / reranking; the big model only synthesizes — CPU-friendly |
-| Keyless | No API keys for any of it. Local models optional. |
+| Evidence windows | The LLM reads query-matched passages, not just the first 4,000 characters of each page |
+| Agentic research loop | Facet planning → multi-round retrieval → independent-domain coverage → targeted gap searches |
+| Diverse evidence | Sources ranked for relevance, configured authority tier, host diversity and lexical novelty |
+| Citation diagnostics | Quote grounding plus claim-level citation presence, valid-index and lexical-overlap checks |
+| Smart model routing | A smaller model can handle planning and gap analysis; the main model synthesizes |
+| Keyless | No API keys for search. Local models are optional. |
 
 Agent-friendly output contract: every mode prints exactly **one JSON document**
 to stdout (logs go to stderr). Exit codes: `0` ok, `1` error, `3` empty result.
@@ -79,17 +81,23 @@ same CLI shown above — there is no second API to learn.
 ## How `pro` works
 
 ```
-query ─> decompose (small model) ─> search 8+ backends ─> extract pages
-      ─> rank ─> evidence windows (query-matched passages)
-      ─> synthesis (main model, Ollama or OpenAI-compatible)
-      ─> quote grounding ─> one JSON doc (synthesis + citations + coverage)
+query ─> research facets ─> search 8+ backends ─> extract pages
+      ─> score evidence ─> independent-domain facet coverage
+      ─> targeted gap searches ─> diverse source selection
+      ─> synthesis (local Ollama / OpenAI-compatible endpoint)
+      ─> quote grounding + citation audit ─> one JSON research report
 ```
 
-Measured on this exact flow (2026-10-07, live network, qwen3.5:9b on 24-core
-CPU, 9 runs across 3 questions): **90% ± 14 of quoted citations grounded** in
-source pages, ~20-30 sources per run, ~6-7 min per question with thinking on.
-Passage-window evidence beat plain head-truncation in a controlled A/B (higher
-grounded rate, tighter spread, no latency cost).
+The `pro` payload exposes the planned facets, per-facet independent-domain
+coverage, selected sources, quote-grounding records and a claim-citation audit.
+The audit reports uncited claims, invalid citation indices and lexical overlap
+between each claim and its cited source. **Lexical overlap and quote grounding
+are diagnostics, not proof of semantic entailment or factual correctness.**
+See [Research quality and citation diagnostics](docs/RESEARCH_QUALITY.md) for
+field definitions and limitations.
+
+Historical benchmark records remain in `bench/`; live search results and
+provider latency vary, so those records are not current performance guarantees.
 
 ## Configuration
 
