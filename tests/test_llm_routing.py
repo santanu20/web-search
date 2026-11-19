@@ -162,3 +162,67 @@ def test_unit__ollama_call__keep_alive_in_payload(monkeypatch):
     ws._ollama_call("p", model="main:9b")
     sent = json.loads(captured[0].data.decode())
     assert sent["keep_alive"] == "30m"
+
+
+
+def test_unit__llm_egress_guard__local_only_rejects_remote_host(monkeypatch):
+    import dataclasses
+    import pytest
+
+    cfg = dataclasses.replace(
+        ws._settings,
+        llm=_settings_with(egress_policy="local_only"),
+    )
+    monkeypatch.setattr(ws, "_settings", cfg)
+
+    ws._llm_egress_guard("http://localhost:11434")
+    ws._llm_egress_guard("http://127.0.0.1:11434")
+    ws._llm_egress_guard("http://[::1]:11434")
+    with pytest.raises(ws.OllamaUnavailable, match="local_only"):
+        ws._llm_egress_guard("https://llm.example.com")
+
+
+def test_unit__llm_egress_guard__allowlist_requires_exact_host(monkeypatch):
+    import dataclasses
+    import pytest
+
+    cfg = dataclasses.replace(
+        ws._settings,
+        llm=_settings_with(
+            egress_policy="allowlist",
+            allowed_hosts=("llm.example.com",),
+        ),
+    )
+    monkeypatch.setattr(ws, "_settings", cfg)
+
+    ws._llm_egress_guard("https://llm.example.com:443")
+    with pytest.raises(ws.OllamaUnavailable, match="not in WEB_SEARCH_LLM_ALLOWED_HOSTS"):
+        ws._llm_egress_guard("https://other.example.com")
+    with pytest.raises(ws.OllamaUnavailable):
+        ws._llm_egress_guard("https://sub.llm.example.com")
+
+
+def test_unit__llm_egress_guard__warn_preserves_existing_remote_behavior(monkeypatch, caplog):
+    import dataclasses
+
+    cfg = dataclasses.replace(ws._settings, llm=_settings_with(egress_policy="warn"))
+    monkeypatch.setattr(ws, "_settings", cfg)
+    with caplog.at_level("WARNING", logger="web_search"):
+        ws._llm_egress_guard("https://llm.example.com")
+    assert any("llm_egress_nonlocal" in record.message for record in caplog.records)
+
+
+def test_unit__settings_from_env__llm_egress_policy_and_host_allowlist(monkeypatch):
+    monkeypatch.setenv("WEB_SEARCH_LLM_EGRESS_POLICY", "allowlist")
+    monkeypatch.setenv("WEB_SEARCH_LLM_ALLOWED_HOSTS", "llm.example.com, model.internal ")
+    cfg = ws.Settings.from_env()
+    assert cfg.llm.egress_policy == "allowlist"
+    assert cfg.llm.allowed_hosts == ("llm.example.com", "model.internal")
+
+
+def test_unit__settings_from_env__rejects_unknown_llm_egress_policy(monkeypatch):
+    import pytest
+
+    monkeypatch.setenv("WEB_SEARCH_LLM_EGRESS_POLICY", "open-to-everything")
+    with pytest.raises(ValueError, match="WEB_SEARCH_LLM_EGRESS_POLICY"):
+        ws.Settings.from_env()
