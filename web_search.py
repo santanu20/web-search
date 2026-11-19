@@ -59,6 +59,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from source_intelligence import analyze_sources
+
 from research_evidence import (
     assign_counter_evidence,
     build_evidence_sources,
@@ -8612,6 +8614,11 @@ def _pro_search(
                 }
             )
 
+    # Source lineage and independence signals are kept separate from relevance
+    # and domain-tier heuristics. Group same publishers and near-duplicate
+    # syndicated pages so repeated copies are not counted as independent evidence.
+    source_intelligence = analyze_sources(sources, all_extracted, max_sources=50)
+
     # Final coverage (keyword + optional semantic) + confidence
     cov_frac, cov_map = _compute_pro_coverage(query_terms, all_extracted)
     facet_cov_frac, facet_cov_detail = rq.compute_facet_coverage(
@@ -8847,6 +8854,9 @@ def _pro_search(
         "follow_ups": follow_ups,
         "key_findings": key_findings,
         "sources": sources,
+        "source_intelligence": source_intelligence["summary"],
+        "source_profiles": source_intelligence["sources"],
+        "source_duplicate_pairs": source_intelligence["duplicate_pairs"],
         "results": all_results,
         "meta": {
             "pages_fetched": len(all_results),
