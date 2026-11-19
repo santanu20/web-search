@@ -477,7 +477,9 @@ uv run python $SCRIPT pro "kubernetes pod security" --use-llm \
 | `WEB_SEARCH_EVIDENCE_MODE` | `passage` | `passage` = query-relevant evidence windows for synthesis + quote grounding; `head` = legacy `[:4000]` head-truncation (A/B kill-switch) |
 | `WEB_SEARCH_EMBED_MODEL` | `nomic-embed-text` | embedding model for `--semantic-coverage` |
 | `WEB_SEARCH_LLM_PROVIDER` | `auto` | `auto` (probe the host) \| `ollama` \| `openai` — pin to skip probing |
-| `WEB_SEARCH_LLM_HOST` | `http://localhost:11434` | LLM REST base (localhost only — §7g data-egress guard). Host ending in `/v1` → OpenAI-compatible; else probed (`/api/tags` → ollama, `/v1/models` → openai) |
+| `WEB_SEARCH_LLM_HOST` | `http://localhost:11434` | LLM REST base. Host ending in `/v1` → OpenAI-compatible; else probed (`/api/tags` → ollama, `/v1/models` → openai) |
+| `WEB_SEARCH_LLM_EGRESS_POLICY` | `warn` | `warn` preserves current behavior and logs off-machine egress; `local_only` blocks non-loopback hosts; `allowlist` permits loopback plus exact hosts in `WEB_SEARCH_LLM_ALLOWED_HOSTS` |
+| `WEB_SEARCH_LLM_ALLOWED_HOSTS` | (empty) | comma-separated exact hostnames approved when egress policy is `allowlist`; no wildcard/subdomain matching |
 | `WEB_SEARCH_OLLAMA_HOST` | *(legacy alias)* | backward-compat alias for `WEB_SEARCH_LLM_HOST` |
 | `WEB_SEARCH_LLM_MAX_TOKENS` | `4096` | max tokens per LLM call (synthesis auto-raises to 8192 with --think) |
 | `WEB_SEARCH_LLM_TIMEOUT` | `120.0` | per-LLM-call timeout (s) (synthesis auto-raises to 300 with --think) |
@@ -498,9 +500,12 @@ CLI overrides: `--model <name>`, `--embed-model <name>`, `--think`, `--stream`, 
 | `--no-auto-crawl` | OFF | disable post-search domain crawling. Default ON: crawls top 3 domains for 10 pages each → adds ~20-30 full pages of evidence that search snippets can't surface. |
 | `--crawl-pages N` | 10 | pages to crawl per top-domain in auto-crawl phase. |
 
-**Egress guard**: if the resolved LLM host (`WEB_SEARCH_LLM_HOST`, any
-provider) points off-machine, a warning is logged (`llm_egress_nonlocal`).
-Local LLMs only per §7g.
+**LLM egress policy**: `warn` is backward-compatible and logs when prompts
+or extracted evidence are sent to an off-machine model host. Set
+`WEB_SEARCH_LLM_EGRESS_POLICY=local_only` to reject non-loopback endpoints, or
+`allowlist` with `WEB_SEARCH_LLM_ALLOWED_HOSTS=host1.example,host2.example`
+to approve exact remote hostnames. These checks apply to generation and
+embedding calls. The default does not silently block existing remote runtimes.
 
 **Model choice = primary quality lever.** Dense models (qwen3.5:9b, 9B active
 params) produce 2-3x longer synthesis with 3-4x more verified citations than
@@ -940,7 +945,8 @@ Defaults are set for **deep research** — generous but still bounded to prevent
 
 | Var | Default | Purpose |
 |-----|---------|---------|
-| `WEB_SEARCH_TRUSTED_HOSTS` | (empty) | comma-separated allowlist for legitimate internal hosts (e.g. `localhost,intranet.corp`). Metadata endpoints (169.254.169.254 etc.) ALWAYS blocked. |
+| `WEB_SEARCH_TRUSTED_HOSTS` | (empty) | exact hostnames that may be considered for an internal/private exception; alone, this does NOT bypass private-IP checks |
+| `WEB_SEARCH_TRUSTED_HOSTS_ALLOW_PRIVATE` | `0` | set `1` only when those exact trusted hosts must reach private/loopback IPs; this is a separate explicit opt-in and is logged at startup. Metadata endpoints ALWAYS blocked. |
 | `WEB_SEARCH_MAX_RESPONSE_BYTES` | `200000000` | max bytes per HTTP response (200 MB) — guards against decompression bombs |
 | `WEB_SEARCH_MAX_HTML_BYTES` | `100000000` | max HTML body cap (100 MB) |
 | `WEB_SEARCH_MAX_MARKDOWN_BYTES` | `50000000` | max extracted markdown (50 MB) |
