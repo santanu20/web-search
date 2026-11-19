@@ -226,3 +226,28 @@ def test_unit__settings_from_env__rejects_unknown_llm_egress_policy(monkeypatch)
     monkeypatch.setenv("WEB_SEARCH_LLM_EGRESS_POLICY", "open-to-everything")
     with pytest.raises(ValueError, match="WEB_SEARCH_LLM_EGRESS_POLICY"):
         ws.Settings.from_env()
+
+
+
+def test_unit__llm_call__local_only_blocks_before_light_model_probe(monkeypatch):
+    import dataclasses
+    import pytest
+
+    cfg = dataclasses.replace(
+        ws._settings,
+        llm=_settings_with(
+            ollama_host="https://remote-llm.example",
+            egress_policy="local_only",
+        ),
+    )
+    monkeypatch.setattr(ws, "_settings", cfg)
+    monkeypatch.setattr(
+        ws, "_pick_light_model",
+        lambda host: (_ for _ in ()).throw(AssertionError("must block before model discovery")),
+    )
+    monkeypatch.setattr(
+        ws, "_llm_probe",
+        lambda host=None: (_ for _ in ()).throw(AssertionError("must block before provider probe")),
+    )
+    with pytest.raises(ws.OllamaUnavailable, match="local_only"):
+        ws._llm_call("private research evidence", light=True)
