@@ -105,15 +105,27 @@ def test_allows_public_dns(resolver):
 # --------------------------------------------------------------------------- #
 
 
-def test_trusted_hosts_allows_localhost():
-    resolver = ws.SafeURLResolver(trusted_hosts={"localhost"})
+def test_trusted_host_does_not_bypass_private_ip_policy_by_default():
+    resolver = ws.SafeURLResolver(trusted_hosts={"localhost"}, dns_ttl=0)
+    with pytest.raises(ws.SSRFBlocked):
+        resolver.resolve_and_validate("http://localhost:4479/")
+
+
+def test_trusted_hosts_allows_localhost_only_with_explicit_private_opt_in():
+    resolver = ws.SafeURLResolver(
+        trusted_hosts={"localhost"},
+        allow_trusted_private_hosts=True,
+    )
     target = resolver.resolve_and_validate("http://localhost:4479/")
     assert target.is_trusted is True
 
 
 def test_metadata_still_blocked_when_trusted():
-    """Metadata endpoints must NEVER be allowlisted, even if listed in trusted_hosts."""
-    resolver = ws.SafeURLResolver(trusted_hosts={"169.254.169.254"})
+    """Metadata endpoints must NEVER be allowlisted, even with private opt-in."""
+    resolver = ws.SafeURLResolver(
+        trusted_hosts={"169.254.169.254"},
+        allow_trusted_private_hosts=True,
+    )
     with pytest.raises(ws.SSRFBlocked):
         resolver.resolve_and_validate("http://169.254.169.254/")
 
@@ -154,3 +166,21 @@ def test_search_error_hierarchy():
         ws.ExtractionFailed,
     ]:
         assert issubclass(exc_class, ws.SearchError)
+
+
+
+def test_trusted_host_private_bypass_is_disabled_by_default_env(monkeypatch):
+    monkeypatch.setattr(ws, "_resolver_instance", None)
+    monkeypatch.setenv("WEB_SEARCH_TRUSTED_HOSTS", "localhost")
+    monkeypatch.delenv("WEB_SEARCH_TRUSTED_HOSTS_ALLOW_PRIVATE", raising=False)
+    resolver = ws.get_safe_url_resolver()
+    assert resolver._configured_trusted == {"localhost"}
+    assert resolver._trusted == set()
+
+
+def test_trusted_host_private_bypass_requires_explicit_env_opt_in(monkeypatch):
+    monkeypatch.setattr(ws, "_resolver_instance", None)
+    monkeypatch.setenv("WEB_SEARCH_TRUSTED_HOSTS", "localhost")
+    monkeypatch.setenv("WEB_SEARCH_TRUSTED_HOSTS_ALLOW_PRIVATE", "1")
+    resolver = ws.get_safe_url_resolver()
+    assert resolver._trusted == {"localhost"}

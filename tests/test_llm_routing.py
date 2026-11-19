@@ -60,7 +60,7 @@ def test_unit__llm_call__explicit_model_beats_light_routing(monkeypatch):
 
     cfg = dataclasses.replace(ws._settings, llm=_settings_with())
     monkeypatch.setattr(ws, "_settings", cfg)
-    monkeypatch.setattr(ws, "_llm_probe", lambda host=None: "ollama")
+    monkeypatch.setattr(ws, "_llm_probe", lambda host=None, **kwargs: "ollama")
     monkeypatch.setattr(
         ws.urllib_request,
         "urlopen",
@@ -76,7 +76,7 @@ def test_unit__llm_call__light_uses_configured_light_model(monkeypatch):
 
     cfg = dataclasses.replace(ws._settings, llm=_settings_with(light_model="small:1b"))
     monkeypatch.setattr(ws, "_settings", cfg)
-    monkeypatch.setattr(ws, "_llm_probe", lambda host=None: "ollama")
+    monkeypatch.setattr(ws, "_llm_probe", lambda host=None, **kwargs: "ollama")
     probe_calls = []
     monkeypatch.setattr(
         ws,
@@ -100,7 +100,7 @@ def test_unit__llm_call__main_stage_unaffected_without_light(monkeypatch):
 
     cfg = dataclasses.replace(ws._settings, llm=_settings_with())
     monkeypatch.setattr(ws, "_settings", cfg)
-    monkeypatch.setattr(ws, "_llm_probe", lambda host=None: "ollama")
+    monkeypatch.setattr(ws, "_llm_probe", lambda host=None, **kwargs: "ollama")
     monkeypatch.setattr(
         ws,
         "_pick_light_model",
@@ -162,3 +162,117 @@ def test_unit__ollama_call__keep_alive_in_payload(monkeypatch):
     ws._ollama_call("p", model="main:9b")
     sent = json.loads(captured[0].data.decode())
     assert sent["keep_alive"] == "30m"
+
+
+
+def test_unit__llm_egress_guard__local_only_rejects_remote_host(monkeypatch):
+    import dataclasses
+    import pytest
+
+    cfg = dataclasses.replace(
+        ws._settings,
+        llm=_settings_with(egress_policy="local_only"),
+    )
+    monkeypatch.setattr(ws, "_settings", cfg)
+
+    ws._llm_egress_guard("http://localhost:11434")
+    ws._llm_egress_guard("http://127.0.0.1:11434")
+    ws._llm_egress_guard("http://[::1]:11434")
+    with pytest.raises(ws.OllamaUnavailable, match="local_only"):
+        ws._llm_egress_guard("https://llm.example.com")
+
+
+def test_unit__llm_egress_guard__allowlist_requires_exact_host(monkeypatch):
+    import dataclasses
+    import pytest
+
+    cfg = dataclasses.replace(
+        ws._settings,
+        llm=_settings_with(
+            egress_policy="allowlist",
+            allowed_hosts=("llm.example.com",),
+        ),
+    )
+    monkeypatch.setattr(ws, "_settings", cfg)
+
+    ws._llm_egress_guard("https://llm.example.com:443")
+    with pytest.raises(ws.OllamaUnavailable, match="not in WEB_SEARCH_LLM_ALLOWED_HOSTS"):
+        ws._llm_egress_guard("https://other.example.com")
+    with pytest.raises(ws.OllamaUnavailable):
+        ws._llm_egress_guard("https://sub.llm.example.com")
+
+
+def test_unit__llm_egress_guard__warn_preserves_existing_remote_behavior(monkeypatch, caplog):
+    import dataclasses
+
+    cfg = dataclasses.replace(ws._settings, llm=_settings_with(egress_policy="warn"))
+    monkeypatch.setattr(ws, "_settings", cfg)
+    with caplog.at_level("WARNING", logger="web_search"):
+        ws._llm_egress_guard("https://llm.example.com")
+    assert any("llm_egress_nonlocal" in record.message for record in caplog.records)
+
+
+def test_unit__settings_from_env__llm_egress_policy_and_host_allowlist(monkeypatch):
+    monkeypatch.setenv("WEB_SEARCH_LLM_EGRESS_POLICY", "allowlist")
+    monkeypatch.setenv("WEB_SEARCH_LLM_ALLOWED_HOSTS", "llm.example.com, model.internal ")
+    cfg = ws.Settings.from_env()
+    assert cfg.llm.egress_policy == "allowlist"
+    assert cfg.llm.allowed_hosts == ("llm.example.com", "model.internal")
+
+
+def test_unit__settings_from_env__rejects_unknown_llm_egress_policy(monkeypatch):
+    import pytest
+
+    monkeypatch.setenv("WEB_SEARCH_LLM_EGRESS_POLICY", "open-to-everything")
+    with pytest.raises(ValueError, match="WEB_SEARCH_LLM_EGRESS_POLICY"):
+        ws.Settings.from_env()
+
+
+
+def test_unit__llm_call__local_only_blocks_before_light_model_probe(monkeypatch):
+    import dataclasses
+    import pytest
+
+    cfg = dataclasses.replace(
+        ws._settings,
+        llm=_settings_with(
+            ollama_host="https://remote-llm.example",
+            egress_policy="local_only",
+        ),
+    )
+    monkeypatch.setattr(ws, "_settings", cfg)
+    monkeypatch.setattr(
+        ws, "_pick_light_model",
+        lambda host: (_ for _ in ()).throw(AssertionError("must block before model discovery")),
+    )
+    monkeypatch.setattr(
+        ws, "_llm_probe",
+        lambda host=None: (_ for _ in ()).throw(AssertionError("must block before provider probe")),
+    )
+    with pytest.raises(ws.OllamaUnavailable, match="local_only"):
+        ws._llm_call("private research evidence", light=True)
+
+
+
+def test_unit__llm_probe__local_only_blocks_direct_provider_probe(monkeypatch):
+    import dataclasses
+    import pytest
+
+    cfg = dataclasses.replace(
+        ws._settings,
+        llm=_settings_with(
+            ollama_host="https://remote-llm.example",
+            egress_policy="local_only",
+        ),
+    )
+    monkeypatch.setattr(ws, "_settings", cfg)
+    monkeypatch.setattr(
+        ws.urllib_request,
+        "urlopen",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("provider probe must be blocked before network I/O")
+        ),
+    )
+    ws._LLM_PROVIDER_CACHE.pop("https://remote-llm.example", None)
+    with pytest.raises(ws.OllamaUnavailable, match="local_only"):
+        ws._llm_probe()
