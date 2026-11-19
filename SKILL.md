@@ -398,6 +398,10 @@ uv run python $SCRIPT pro "what is kubernetes pod security" --use-llm
 uv run python $SCRIPT pro "ETF creation redemption arbitrage mechanism" --use-llm \
     --think --stream --semantic-coverage
 
+# Claim-level evidence audit (one additional model call; opt-in)
+uv run python $SCRIPT pro "ETF creation redemption arbitrage mechanism" --use-llm \
+    --no-think --verify-claims
+
 # Override models (no hardcoded model anywhere)
 uv run python $SCRIPT pro "kubernetes pod security" --use-llm \
     --model llama3.2 --embed-model all-minilm
@@ -427,6 +431,13 @@ uv run python $SCRIPT pro "kubernetes pod security" --use-llm \
               verbatim ≤40-word quote per citation; each quote is fuzzy-verified
               (difflib, ratio floor 0.65) against the extracted page content and
               the per-citation verdict lands in `citation_grounding[]`.
+
+5. CLAIM AUDIT (opt-in: --verify-claims)
+   split synthesis into sentence-sized claims → resolve [n] source references
+   → one bounded model pass checks claim/source entailment and returns exact
+     source quotes → server validates every quote against the captured snapshot
+   → results land in claim_audit[] + claim_audit_summary. No matching quote,
+     unknown source, or uncited claim can be marked supported.
 ```
 
 ### Output schema (progressive disclosure)
@@ -453,6 +464,13 @@ uv run python $SCRIPT pro "kubernetes pod security" --use-llm \
     {"index": 1, "quote": "verbatim quote from the source", "grounded": true, "ratio": 1.0},
     {"index": 2, "quote": "quote not found in extracted content", "grounded": false, "ratio": 0.31}
   ],
+  "claim_audit": [
+    {"claim_id": "C001", "claim": "A factual statement [1].", "status": "supported",
+     "cited_source_ids": ["..."], "evidence": [{"source_id": "...", "stance": "supports",
+     "quote": "verbatim source span"}], "rationale": "brief explanation"}
+  ],
+  "claim_audit_summary": {"verifier_ran": true, "claim_count": 1, "supported": 1,
+     "unverified": 0, "missing_citation": 0, "support_rate": 1.0},
   "ungrounded_citations": 1,
   "follow_ups": ["related question 1", ...],
   "key_findings": [{"url":"...", "passage":"...", "relevance": 0.8}],
@@ -467,6 +485,7 @@ uv run python $SCRIPT pro "kubernetes pod security" --use-llm \
 - **Post-check**: every `[n]` in synthesis is regex-extracted and verified against the source list. Out-of-range citations logged as `llm_citation_overflow`.
 - **Quote grounding (WS5)**: the LLM must append a `SOURCES:` section with one verbatim ≤40-word quote per cited source. Each quote is fuzzy-verified against the source's extracted content (exact substring → ratio 1.0; else sliding-window `difflib.SequenceMatcher`, floor 0.65). Verdicts surface in `citation_grounding[]` + `ungrounded_citations`. Ungrounded citations are **flagged, never removed** — the verifier reports, the agent judges.
 - **No fabrication instruction**: system prompt explicitly says "If evidence does not cover an aspect, say so explicitly."
+- **Claim-level audit (opt-in)**: `--verify-claims` performs one additional LLM pass over the sources already cited by each claim. A claim is marked `supported` only when the model judges it supported AND a verbatim evidence quote is found in that claim's cited source snapshot. Contradicting spans produce `contradicted` or `mixed`; absent/invalid spans produce `unverified`. This is model-assisted entailment checking, not formal proof or a calibrated confidence score. It does not independently discover contrary sources. Details: `docs/CLAIM_EVIDENCE_AUDIT.md`.
 
 ### LLM config (no hardcoded models)
 
@@ -483,7 +502,7 @@ uv run python $SCRIPT pro "kubernetes pod security" --use-llm \
 | `WEB_SEARCH_LLM_TIMEOUT` | `120.0` | per-LLM-call timeout (s) (synthesis auto-raises to 300 with --think) |
 | `WEB_SEARCH_LLM_THINK` | `1` | chain-of-thought ON by default for deeper reasoning; `0` for 44x faster |
 
-CLI overrides: `--model <name>`, `--embed-model <name>`, `--think`, `--stream`, `--semantic-coverage`.
+CLI overrides: `--model <name>`, `--embed-model <name>`, `--think`, `--stream`, `--semantic-coverage`, `--verify-claims`.
 
 **Latency/quality knobs (think ON by default for quality; --no-think for speed):**
 
@@ -492,6 +511,7 @@ CLI overrides: `--model <name>`, `--embed-model <name>`, `--think`, `--stream`, 
 | `--think` / `--no-think` | ON | chain-of-thought reasoning. ON = deeper decomposition + better synthesis (8192 max_tokens, 300s timeout). OFF = 44x faster (549ms vs 24s per call). Env `WEB_SEARCH_LLM_THINK=0`. |
 | `--stream` | OFF | progressive synthesis output to stderr. Agent sees `llm_stream_progress` events (chars=405, 612, ...) while the LLM generates instead of waiting in silence. |
 | `--semantic-coverage` | OFF | embedding-based coverage via `nomic-embed-text`. Catches paraphrased evidence keyword coverage misses (e.g. "share creation" covered when query asks "ETF creation"). Adds ~50ms/passage. |
+| `--verify-claims` | OFF | one additional main-model pass audits sentence-sized claims against their cited sources. Accepted evidence quotes must match captured source text. Adds model latency/token cost; requires LLM mode. |
 | `--embed-model <name>` | env | override embedding model (no hardcoded model anywhere). |
 | `--max-rounds N` | 5 | reflection rounds (was 3). More rounds = deeper gap-filling. |
 | `--top-n-per-facet N` | 15 | pages extracted per round (was 8). More = wider evidence pool. |
