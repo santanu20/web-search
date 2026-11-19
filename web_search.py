@@ -675,7 +675,8 @@ class Settings:
                 light_model=_env("WEB_SEARCH_LLM_LIGHT_MODEL", ""),
             ),
             call_budget=_env_float("WEB_SEARCH_CALL_BUDGET", 600.0),
-            concurrency=_env_int("WEB_SEARCH_CONCURRENCY", 3),
+            # Bound thread creation if an environment value is misconfigured.
+            concurrency=max(1, min(16, _env_int("WEB_SEARCH_CONCURRENCY", 3))),
             ddgs_threads=_env_int("WEB_SEARCH_DDGS_THREADS", 0),
             max_per_domain=_env_int("WEB_SEARCH_MAX_PER_DOMAIN", 3),
             extract_chars=_env_int("WEB_SEARCH_EXTRACT_CHARS", 0),
@@ -4655,6 +4656,11 @@ class ExtractCascade:
         that guarantees no <!doctype html> ever reaches the output."""
         if result.source == "ddgs" and "<" not in result.html[:2000]:
             return result.html
+        html_bytes = len(result.html.encode("utf-8", errors="ignore"))
+        if html_bytes > DEFAULT_MAX_HTML_BYTES:
+            raise BudgetExceeded(
+                "MAX_HTML_BYTES", DEFAULT_MAX_HTML_BYTES, html_bytes, url
+            )
         text = self.extractor.extract(result.html, url)
         # If the extractor returned raw HTML (starts with <!doctype or <html),
         # the page defeated both trafilatura AND crawl4ai — try html2text as a
@@ -4689,6 +4695,31 @@ def _build_default_cascade(ddgs: Any) -> ExtractCascade:
     )
 
 
+def _enforce_extracted_text_budgets(content: str, url: str) -> str:
+    """Enforce configured markdown byte and document character budgets."""
+    chars = len(content)
+    if chars > DEFAULT_MAX_DOCUMENT_CHARS:
+        raise BudgetExceeded(
+            "MAX_DOCUMENT_CHARS", DEFAULT_MAX_DOCUMENT_CHARS, chars, url
+        )
+    byte_count = len(content.encode("utf-8", errors="ignore"))
+    if byte_count > DEFAULT_MAX_MARKDOWN_BYTES:
+        raise BudgetExceeded(
+            "MAX_MARKDOWN_BYTES", DEFAULT_MAX_MARKDOWN_BYTES, byte_count, url
+        )
+    return content
+
+
+def _truncate_utf8_to_bytes(content: str, max_bytes: int) -> tuple[str, bool]:
+    """Return valid UTF-8 content no larger than max_bytes and a truncation flag."""
+    raw = content.encode("utf-8", errors="ignore")
+    if len(raw) <= max_bytes:
+        return content, False
+    if max_bytes <= 0:
+        return "", True
+    return raw[:max_bytes].decode("utf-8", errors="ignore"), True
+
+
 def _extract_with_fallback(ddgs, url: str, *, proxy_for_log: str = "<none>") -> str:
     """Layered extract with cookie persistence + per-URL TTL cache.
 
@@ -4721,6 +4752,11 @@ def _extract_with_fallback(ddgs, url: str, *, proxy_for_log: str = "<none>") -> 
                 )
                 _cache_delete(cache_key)
             else:
+                try:
+                    content = _enforce_extracted_text_budgets(content, url)
+                except BudgetExceeded:
+                    _cache_delete(cache_key)
+                    raise
                 log.info(
                     "extract_cache_hit",
                     url=url[:60],
@@ -4738,6 +4774,7 @@ def _extract_with_fallback(ddgs, url: str, *, proxy_for_log: str = "<none>") -> 
         _maybe_neg_cache(cache_key, ex)
         raise
 
+    text = _enforce_extracted_text_budgets(text, url)
     if DEFAULT_CACHE_ENABLED and text:
         _cache_write(cache_key, {"content": text})
     return text
@@ -5111,7 +5148,11 @@ def _score_anchor_text(anchor_text: str, query_terms: set[str]) -> int:
 
 
 def _extract_links_from_markdown(
-    content: str, base_host: str, base_url: str
+    content: str,
+    base_host: str,
+    base_url: str,
+    *,
+    max_links: int | None = None,
 ) -> list[tuple[str, str]]:
     """Parse ALL internal links from markdown. Resolves relative URLs.
 
@@ -5120,13 +5161,15 @@ def _extract_links_from_markdown(
     as (canonical_url, anchor_text) tuples — anchor text feeds F3 frontier
     scoring, empty for reference/bare links where no label exists.
     """
-    if not content or not base_host:
+    if not content or not base_host or (max_links is not None and max_links <= 0):
         return []
 
     links: list[tuple[str, str]] = []
     seen: set[str] = set()
 
     def _try_add(raw_url: str, text: str = "") -> None:
+        if max_links is not None and len(links) >= max_links:
+            return
         # Strip trailing punctuation + quotes (markdown link extraction can
         # capture trailing ", ', ), ] that aren't part of the URL).
         raw_url = raw_url.strip().rstrip(".,;)}]\"'")
@@ -5157,16 +5200,22 @@ def _extract_links_from_markdown(
     # Reference definitions: [1]: url-or-relative-path
     ref_urls: dict[str, str] = {}
     for m in _RE_REF_DEF.finditer(content):
+        if max_links is not None and len(links) >= max_links:
+            break
         ref_id = m.group(1)
         ref_urls[ref_id] = m.group(2)
         _try_add(m.group(2))
 
     # Inline links: [text](url) — group(1)=text, group(2)=url (F3)
     for m in _RE_INLINE_LINK.finditer(content):
+        if max_links is not None and len(links) >= max_links:
+            break
         _try_add(m.group(2), m.group(1))
 
     # Bare URLs
     for m in _RE_BARE_URL.finditer(content):
+        if max_links is not None and len(links) >= max_links:
+            break
         _try_add(m.group(0))
 
     return links
@@ -5546,21 +5595,29 @@ def _crawl_site(
             continue
 
         title = _extract_page_title(content)
-        # Crawl byte-budget accounting (guards against pathological multi-GB crawls)
-        crawl_bytes += len(content.encode("utf-8", errors="ignore"))
-        if crawl_bytes > DEFAULT_MAX_CRAWL_BYTES:
+        # Aggregate budget is a hard output bound: clip the final page to the
+        # remaining UTF-8 allowance instead of retaining an over-budget page.
+        remaining_crawl_bytes = max(0, DEFAULT_MAX_CRAWL_BYTES - crawl_bytes)
+        bounded_content, was_truncated = _truncate_utf8_to_bytes(
+            content, remaining_crawl_bytes
+        )
+        if was_truncated:
+            crawl_bytes += len(bounded_content.encode("utf-8", errors="ignore"))
             log.warning(
                 "crawl_byte_budget_hit_mid",
                 bytes=crawl_bytes,
                 limit=DEFAULT_MAX_CRAWL_BYTES,
                 pages=len(pages),
+                original_chars=len(content),
+                retained_chars=len(bounded_content),
             )
             pages.append(
                 {
                     "url": url,
-                    "title": title,
-                    "content": content,
-                    "chars": len(content),
+                    "title": _extract_page_title(bounded_content) or title,
+                    "content": bounded_content,
+                    "chars": len(bounded_content),
+                    "original_chars": len(content),
                     "depth": depth,
                     "n_links_found": 0,
                     "latency_s": elapsed,
@@ -5568,13 +5625,23 @@ def _crawl_site(
                 }
             )
             break
+        crawl_bytes += len(content.encode("utf-8", errors="ignore"))
         # Parse links from FULL content (link defs at bottom, no truncation).
         # Cap per-page links to bound frontier growth on link-farm pages.
         # F3: links now carry (url, anchor_text) tuples — anchor text feeds
         # frontier scoring; R1: unpack tuples for all_links (plain URL set).
-        found_links = _extract_links_from_markdown(content, base_host, url)[
-            :DEFAULT_MAX_LINKS_PER_PAGE
-        ]
+        remaining_link_budget = max(
+            0, DEFAULT_MAX_TOTAL_LINKS - len(all_links)
+        )
+        per_page_link_budget = min(
+            DEFAULT_MAX_LINKS_PER_PAGE, remaining_link_budget
+        )
+        found_links = _extract_links_from_markdown(
+            content,
+            base_host,
+            url,
+            max_links=per_page_link_budget,
+        )
         all_links.update(u for u, _ in found_links)
 
         # NO truncation — full page content stored as-is
