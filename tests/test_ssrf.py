@@ -166,3 +166,21 @@ def test_search_error_hierarchy():
         ws.ExtractionFailed,
     ]:
         assert issubclass(exc_class, ws.SearchError)
+
+
+
+def test_trusted_host_private_bypass_is_disabled_by_default_env(monkeypatch):
+    monkeypatch.setattr(ws, "_resolver_instance", None)
+    monkeypatch.setenv("WEB_SEARCH_TRUSTED_HOSTS", "localhost")
+    monkeypatch.delenv("WEB_SEARCH_TRUSTED_HOSTS_ALLOW_PRIVATE", raising=False)
+    resolver = ws.get_safe_url_resolver()
+    assert resolver._configured_trusted == {"localhost"}
+    assert resolver._trusted == set()
+
+
+def test_trusted_host_private_bypass_requires_explicit_env_opt_in(monkeypatch):
+    monkeypatch.setattr(ws, "_resolver_instance", None)
+    monkeypatch.setenv("WEB_SEARCH_TRUSTED_HOSTS", "localhost")
+    monkeypatch.setenv("WEB_SEARCH_TRUSTED_HOSTS_ALLOW_PRIVATE", "1")
+    resolver = ws.get_safe_url_resolver()
+    assert resolver._trusted == {"localhost"}
