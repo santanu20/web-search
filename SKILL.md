@@ -402,6 +402,10 @@ uv run python $SCRIPT pro "ETF creation redemption arbitrage mechanism" --use-ll
 uv run python $SCRIPT pro "ETF creation redemption arbitrage mechanism" --use-llm \
     --no-think --verify-claims
 
+# Search for contrary evidence on new hosts, then audit both sides
+uv run python $SCRIPT pro "ETF creation redemption arbitrage mechanism" --use-llm \
+    --no-think --counter-evidence
+
 # Override models (no hardcoded model anywhere)
 uv run python $SCRIPT pro "kubernetes pod security" --use-llm \
     --model llama3.2 --embed-model all-minilm
@@ -438,6 +442,13 @@ uv run python $SCRIPT pro "kubernetes pod security" --use-llm \
      source quotes → server validates every quote against the captured snapshot
    → results land in claim_audit[] + claim_audit_summary. No matching quote,
      unknown source, or uncited claim can be marked supported.
+6. COUNTER-EVIDENCE (opt-in: --counter-evidence; implies --verify-claims)
+   create bounded contrary-evidence queries for up to 8 cited claims
+   → search without reusing URLs from the original investigation
+   → attach relevant candidates only to matching claims and require a new host
+   → verifier classifies support/contradiction/context separately
+   → server validates exact quotes and labels evidence source_role.
+
 ```
 
 ### Output schema (progressive disclosure)
@@ -471,6 +482,10 @@ uv run python $SCRIPT pro "kubernetes pod security" --use-llm \
   ],
   "claim_audit_summary": {"verifier_ran": true, "claim_count": 1, "supported": 1,
      "unverified": 0, "missing_citation": 0, "support_rate": 1.0},
+  "counter_evidence": {"enabled": true, "queries": 1, "results": 6,
+     "extracted": 3, "claims_with_candidates": 1, "status": "ok",
+     "sources": [{"url": "...", "title": "...", "host": "..."}],
+     "claims": {"C001": ["counter-source-id"]}},
   "ungrounded_citations": 1,
   "follow_ups": ["related question 1", ...],
   "key_findings": [{"url":"...", "passage":"...", "relevance": 0.8}],
@@ -485,6 +500,7 @@ uv run python $SCRIPT pro "kubernetes pod security" --use-llm \
 - **Post-check**: every `[n]` in synthesis is regex-extracted and verified against the source list. Out-of-range citations logged as `llm_citation_overflow`.
 - **Quote grounding (WS5)**: the LLM must append a `SOURCES:` section with one verbatim ≤40-word quote per cited source. Each quote is fuzzy-verified against the source's extracted content (exact substring → ratio 1.0; else sliding-window `difflib.SequenceMatcher`, floor 0.65). Verdicts surface in `citation_grounding[]` + `ungrounded_citations`. Ungrounded citations are **flagged, never removed** — the verifier reports, the agent judges.
 - **No fabrication instruction**: system prompt explicitly says "If evidence does not cover an aspect, say so explicitly."
+- **Counter-evidence discovery (opt-in)**: `--counter-evidence` implies `--verify-claims`, creates up to 8 contrary-evidence queries, searches for URLs not already used in the investigation, and attaches relevant results from different hosts to the matching claim. A different host does not prove organizational independence. Search and extraction consume the remaining research budget.
 - **Claim-level audit (opt-in)**: `--verify-claims` performs one additional LLM pass over the sources already cited by each claim. A claim is marked `supported` only when the model judges it supported AND a verbatim evidence quote is found in that claim's cited source snapshot. Contradicting spans produce `contradicted` or `mixed`; absent/invalid spans produce `unverified`. This is model-assisted entailment checking, not formal proof or a calibrated confidence score. It does not independently discover contrary sources. Details: `docs/CLAIM_EVIDENCE_AUDIT.md`.
 
 ### LLM config (no hardcoded models)
@@ -502,7 +518,7 @@ uv run python $SCRIPT pro "kubernetes pod security" --use-llm \
 | `WEB_SEARCH_LLM_TIMEOUT` | `120.0` | per-LLM-call timeout (s) (synthesis auto-raises to 300 with --think) |
 | `WEB_SEARCH_LLM_THINK` | `1` | chain-of-thought ON by default for deeper reasoning; `0` for 44x faster |
 
-CLI overrides: `--model <name>`, `--embed-model <name>`, `--think`, `--stream`, `--semantic-coverage`, `--verify-claims`.
+CLI overrides: `--model <name>`, `--embed-model <name>`, `--think`, `--stream`, `--semantic-coverage`, `--verify-claims`, `--counter-evidence`.
 
 **Latency/quality knobs (think ON by default for quality; --no-think for speed):**
 
@@ -511,6 +527,7 @@ CLI overrides: `--model <name>`, `--embed-model <name>`, `--think`, `--stream`, 
 | `--think` / `--no-think` | ON | chain-of-thought reasoning. ON = deeper decomposition + better synthesis (8192 max_tokens, 300s timeout). OFF = 44x faster (549ms vs 24s per call). Env `WEB_SEARCH_LLM_THINK=0`. |
 | `--stream` | OFF | progressive synthesis output to stderr. Agent sees `llm_stream_progress` events (chars=405, 612, ...) while the LLM generates instead of waiting in silence. |
 | `--semantic-coverage` | OFF | embedding-based coverage via `nomic-embed-text`. Catches paraphrased evidence keyword coverage misses (e.g. "share creation" covered when query asks "ETF creation"). Adds ~50ms/passage. |
+| `--counter-evidence` | OFF | up to 8 targeted searches for contrary evidence on new hosts, followed by claim verification. Implies `--verify-claims`; consumes additional search/extraction/LLM budget. New host does not prove publisher independence. |
 | `--verify-claims` | OFF | one additional main-model pass audits sentence-sized claims against their cited sources. Accepted evidence quotes must match captured source text. Adds model latency/token cost; requires LLM mode. |
 | `--embed-model <name>` | env | override embedding model (no hardcoded model anywhere). |
 | `--max-rounds N` | 5 | reflection rounds (was 3). More rounds = deeper gap-filling. |
