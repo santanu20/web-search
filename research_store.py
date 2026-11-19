@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sqlite3
+from contextlib import contextmanager
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,8 +62,20 @@ class ResearchStore:
         conn.execute("PRAGMA busy_timeout=15000")
         return conn
 
+    @contextmanager
+    def _session(self):
+        conn = self._connect()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def _initialize(self) -> None:
-        with self._connect() as conn:
+        with self._session() as conn:
             version = int(conn.execute("PRAGMA user_version").fetchone()[0])
             if version > SCHEMA_VERSION:
                 raise RuntimeError(
@@ -216,7 +229,6 @@ class ResearchStore:
             source_profiles,
             counter_sources,
         )
-        profile_by_id = {str(p.get("source_id")): p for p in source_profiles if p.get("source_id")}
         source_roles: dict[str, str] = {}
         for source in payload.get("sources") or []:
             url = normalize_url(str(source.get("url") or source.get("href") or ""))
@@ -243,7 +255,7 @@ class ResearchStore:
             "n_sources": payload.get("n_sources"),
         }
 
-        with self._connect() as conn:
+        with self._session() as conn:
             conn.execute("BEGIN IMMEDIATE")
             previous = conn.execute(
                 "SELECT run_id, query_hash, query FROM research_runs "
@@ -399,7 +411,7 @@ class ResearchStore:
         }
 
     def list_projects(self, project_id: str | None = None) -> dict[str, Any]:
-        with self._connect() as conn:
+        with self._session() as conn:
             if project_id:
                 rows = conn.execute(
                     "SELECT p.project_id,p.created_at,p.updated_at,p.last_run_at,"
@@ -418,7 +430,7 @@ class ResearchStore:
     def list_runs(self, project_id: str, limit: int = 20) -> dict[str, Any]:
         project_id = validate_project_id(project_id)
         limit = max(1, min(100, int(limit)))
-        with self._connect() as conn:
+        with self._session() as conn:
             rows = conn.execute(
                 "SELECT run_id,created_at,query,model,summary_json "
                 "FROM research_runs WHERE project_id=? ORDER BY created_at DESC LIMIT ?",
@@ -436,6 +448,6 @@ class ResearchStore:
 
     def delete_project(self, project_id: str) -> bool:
         project_id = validate_project_id(project_id)
-        with self._connect() as conn:
+        with self._session() as conn:
             cur = conn.execute("DELETE FROM projects WHERE project_id=?", (project_id,))
             return cur.rowcount > 0
