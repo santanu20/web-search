@@ -3506,7 +3506,6 @@ def _fetch_curl_cffi(url: str, cookies_header: str = "") -> tuple[str | None, st
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
         "image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
         # WS9: Sec-Ch-Ua must match the advertised Chrome major everywhere
         # (_CHROME_UA_MAJOR) — a 120 header on a chrome124 TLS fingerprint
         # was a free bot tell.
@@ -3582,6 +3581,7 @@ def _fetch_curl_cffi(url: str, cookies_header: str = "") -> tuple[str | None, st
                         headers=prof_headers,
                         timeout=15,
                         allow_redirects=False,
+                        accept_encoding="gzip, deflate, br",
                         curl_options=(
                             {CurlOpt.RESOLVE: [resolve_rule]}
                             if resolve_rule
