@@ -8,7 +8,7 @@ on:
 # Cancel superseded commits from the same PR/branch instead of spending runner
 # time installing the same heavy browser/ML stack for stale revisions.
 concurrency:
-  group: ci-\${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
