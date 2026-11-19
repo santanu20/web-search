@@ -176,4 +176,4 @@ def test_unit__verdict__reports_facet_citation_diversity_and_latency_percentiles
     assert summary["invalid_citations_total"] == 1
     assert summary["unique_domains_mean"] == 5.0
     assert summary["latency_s_p50"] == 20.0
-    assert summary["latency_s_p95"] == 10.0 or summary["latency_s_p95"] == 30.0
+    assert summary["latency_s_p95"] == 30.0
