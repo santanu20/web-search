@@ -251,3 +251,28 @@ def test_unit__llm_call__local_only_blocks_before_light_model_probe(monkeypatch)
     )
     with pytest.raises(ws.OllamaUnavailable, match="local_only"):
         ws._llm_call("private research evidence", light=True)
+
+
+
+def test_unit__llm_probe__local_only_blocks_direct_provider_probe(monkeypatch):
+    import dataclasses
+    import pytest
+
+    cfg = dataclasses.replace(
+        ws._settings,
+        llm=_settings_with(
+            ollama_host="https://remote-llm.example",
+            egress_policy="local_only",
+        ),
+    )
+    monkeypatch.setattr(ws, "_settings", cfg)
+    monkeypatch.setattr(
+        ws.urllib_request,
+        "urlopen",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("provider probe must be blocked before network I/O")
+        ),
+    )
+    ws._LLM_PROVIDER_CACHE.pop("https://remote-llm.example", None)
+    with pytest.raises(ws.OllamaUnavailable, match="local_only"):
+        ws._llm_probe()
