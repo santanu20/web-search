@@ -215,7 +215,25 @@ def test_f32_redirect_without_location_retries_same_url_with_cookies(monkeypatch
     def fake_get(url, **kwargs):
         cookie_header = kwargs.get("headers", {}).get("Cookie")
         calls.append((url, cookie_header))
-        return responses[min(len(calls) - 1, len(responses) - 1)]
+        response = responses[min(len(calls) - 1, len(responses) - 1)]
+        # The production transport now consumes the decompressed response
+        # through curl's bounded content callback rather than .text.
+        if response.status_code == 200:
+            kwargs["content_callback"](response.text.encode("utf-8"))
+        return response
+
+    class _FakeSession:
+        def __init__(self, **kwargs):
+            assert kwargs == {"trust_env": False}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get(self, url, **kwargs):
+            return fake_get(url, **kwargs)
 
     class _StubResolver:
         def resolve_and_validate(self, url):
@@ -225,7 +243,7 @@ def test_f32_redirect_without_location_retries_same_url_with_cookies(monkeypatch
             pass
 
     monkeypatch.setattr(_ws_mod, "get_safe_url_resolver", lambda: _StubResolver())
-    monkeypatch.setattr("curl_cffi.requests.get", fake_get)
+    monkeypatch.setattr("curl_cffi.requests.Session", _FakeSession)
 
     html, _, content_type = ws._fetch_curl_cffi("https://example.com/a")
 
