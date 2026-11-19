@@ -4087,8 +4087,9 @@ class _PinnedConnectProxyHandler(socketserver.BaseRequestHandler):
                 return
 
             try:
+                url_host = f"[{host}]" if ":" in host else host
                 target = self.server.resolver.resolve_and_validate(
-                    f"https://{host}:{port}/"
+                    f"https://{url_host}:{port}/"
                 )
             except (InvalidURL, SSRFBlocked, SearchError) as ex:
                 self.server.record_policy_error(ex)
@@ -4283,6 +4284,10 @@ def _fetch_playwright(url: str, cookies_header: str = "") -> tuple[str | None, s
                         "--disable-blink-features=AutomationControlled",
                         "--no-sandbox",
                         "--disable-dev-shm-usage",
+                        # Chromium bypasses system proxies for loopback by
+                        # default; disable that exception so local/private
+                        # origins still traverse the pinned CONNECT proxy.
+                        "--proxy-bypass-list=<-loopback>",
                     ],
                 )
                 _persistent_ctx = True
@@ -4293,6 +4298,7 @@ def _fetch_playwright(url: str, cookies_header: str = "") -> tuple[str | None, s
                         "--disable-blink-features=AutomationControlled",
                         "--no-sandbox",
                         "--disable-dev-shm-usage",
+                        "--proxy-bypass-list=<-loopback>",
                     ],
                 )
                 context = browser.new_context(
