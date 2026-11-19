@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import statistics
 import subprocess
@@ -197,7 +198,7 @@ def verdict(rows: list[dict], min_success: float, min_grounded: float) -> dict:
     ]
     sorted_lats = sorted(lats)
     p50 = round(statistics.median(sorted_lats), 1) if sorted_lats else None
-    p95 = round(sorted_lats[min(len(sorted_lats) - 1, int(0.95 * (len(sorted_lats) - 1)))], 1) if sorted_lats else None
+    p95 = round(sorted_lats[min(len(sorted_lats) - 1, max(0, math.ceil(0.95 * len(sorted_lats)) - 1))], 1) if sorted_lats else None
     lat_std = round(statistics.pstdev(lats), 1) if len(lats) > 1 else 0.0
     gr_std = round(statistics.pstdev(grs), 2) if len(grs) > 1 else 0.0
     passed = success_rate >= min_success and (
