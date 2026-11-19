@@ -8680,11 +8680,11 @@ def _pro_search(
             )
 
         claim_audit = verify_synthesis_claims(
-            synthesis, sources, all_extracted, _claim_verifier
+            synthesis, sources[:20], all_extracted, _claim_verifier
         )
     else:
         claim_audit = unverified_synthesis_claims(
-            synthesis, sources, all_extracted
+            synthesis, sources[:20], all_extracted
         )
 
     return {
