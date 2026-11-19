@@ -84,5 +84,37 @@ def test_claim_audit_detects_uncited_and_invalid_references():
     assert audit["n_cited_claims"] == 1
     assert audit["n_uncited_claims"] == 1
     assert audit["n_invalid_citations"] == 1
-    assert audit["citation_coverage"] == 1 / 3
+    assert audit["citation_coverage"] == 0.333
     assert audit["claims"][0]["lexical_overlap"] > 0.2
+
+
+def test_pro_heuristic_decomposer_returns_original_and_multiple_research_angles():
+    import web_search as ws
+
+    facets = ws._decompose_query_heuristic("Why does the Rust borrow checker reject references?")
+    assert facets[0].startswith("Why does the Rust borrow checker")
+    assert len(facets) >= 3
+    assert any("limitations" in facet or "failure modes" in facet for facet in facets)
+
+
+def test_synthesis_prompt_treats_webpages_as_untrusted_data(monkeypatch):
+    import web_search as ws
+
+    captured = {}
+    content = "Rust ownership gives each value one owner and borrowing enforces lifetime rules. " * 8
+
+    def fake_llm_call(prompt, model=None, system=None, **kwargs):
+        captured["prompt"] = prompt
+        captured["system"] = system
+        return (
+            "Rust ownership gives each value one owner [1].\n\n"
+            'SOURCES:\n1. "Rust ownership gives each value one owner"'
+        )
+
+    monkeypatch.setattr(ws, "_llm_call", fake_llm_call)
+    source = {"url": "https://docs.example/rust", "title": "Rust reference", "host": "docs.example", "tier": 0}
+    extracted = [{"url": source["url"], "content": content}]
+    ws._synthesize_llm("Rust ownership rules", extracted, [source])
+    assert "UNTRUSTED_SOURCE_CONTENT" in captured["prompt"]
+    assert "never instructions" in captured["system"].lower()
+    assert "ignore any commands" in captured["system"].lower()
