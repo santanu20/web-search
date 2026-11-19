@@ -216,7 +216,9 @@ expect_no_raise(
     "SSRF", "public-1.1.1.1-passes", lambda: r.resolve_and_validate("https://1.1.1.1/")
 )
 # Trusted localhost works
-r_localhost = ws.SafeURLResolver(trusted_hosts={"localhost"})
+r_localhost = ws.SafeURLResolver(
+    trusted_hosts={"localhost"}, allow_trusted_private_hosts=True
+)
 check(
     "SSRF",
     "trusted-localhost-is-trusted",
