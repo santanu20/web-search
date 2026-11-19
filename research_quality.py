@@ -173,12 +173,16 @@ def select_research_sources(extracted: list[dict[str, Any]], query: str, max_sou
         item = candidates.pop(best_idx)
         item["_research_relevance"] = item.pop("_rq_relevance")
         item["_research_novelty"] = round(best_novelty, 4)
-        item.pop("_rq_terms", None)
-        item.pop("_rq_base", None)
+        # Keep the token set while the greedy loop evaluates remaining
+        # candidates against every already-selected source. Strip internals
+        # only after selection is complete.
         chosen.append(item)
         host = _host(item)
         if host:
             per_host[host] += 1
+    for item in chosen:
+        item.pop("_rq_terms", None)
+        item.pop("_rq_base", None)
     return chosen
 
 
