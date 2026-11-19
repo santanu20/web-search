@@ -26,6 +26,7 @@ Two ways to use it:
 | Evidence windows | The LLM reads the passages that match your query, not the first 4,000 chars of each page |
 | Quote-grounded citations | Inline `[n]` markers resolve to real sources and model-provided source quotes are checked against extracted content |
 | Claim-level audit (opt-in) | `--verify-claims` assesses each cited factual claim and rejects evidence quotes absent from the cited source snapshot |
+| Source lineage | Groups sources by publisher domain and identifies exact/near-duplicate content to avoid counting syndicated copies as independent corroboration |
 | Smart model routing | A small model handles query decomposition / reranking; the big model only synthesizes — CPU-friendly |
 | Keyless | No API keys for any of it. Local models optional. |
 
