@@ -45,7 +45,9 @@ import os
 import random
 import re
 import gzip
+import select
 import socket
+import socketserver
 import subprocess
 import sys
 import threading
@@ -3974,6 +3976,208 @@ def _challenge_max_attempts() -> int:
         return 2
 
 
+class _PinnedConnectProxyServer(socketserver.ThreadingTCPServer):
+    """Bounded local HTTPS CONNECT proxy used to pin Chromium destinations."""
+
+    allow_reuse_address = True
+    daemon_threads = True
+    request_queue_size = 32
+
+    def __init__(
+        self, address, resolver: SafeURLResolver, *,
+        max_tunnel_bytes: int, max_total_bytes: int, max_tunnel_seconds: float,
+        max_workers: int = 12,
+    ):
+        self.resolver = resolver
+        self.max_tunnel_bytes = max_tunnel_bytes
+        self.max_total_bytes = max_total_bytes
+        self.max_tunnel_seconds = max_tunnel_seconds
+        self._worker_slots = threading.BoundedSemaphore(max_workers)
+        self._bytes_lock = threading.Lock()
+        self._total_bytes = 0
+        self._error_lock = threading.Lock()
+        self.last_policy_error: Exception | None = None
+        self.last_budget_error: BudgetExceeded | None = None
+        self.last_connect_ips: list[str] = []
+        super().__init__(address, _PinnedConnectProxyHandler)
+
+    def process_request(self, request, client_address):
+        if not self._worker_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._worker_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._worker_slots.release()
+
+    def reserve_bytes(self, amount: int, host: str) -> bool:
+        with self._bytes_lock:
+            next_total = self._total_bytes + amount
+            if next_total > self.max_total_bytes:
+                with self._error_lock:
+                    if self.last_budget_error is None:
+                        self.last_budget_error = BudgetExceeded(
+                            "MAX_BROWSER_PROXY_BYTES", self.max_total_bytes,
+                            next_total, f"https://{host}/",
+                        )
+                return False
+            self._total_bytes = next_total
+            return True
+
+    def record_policy_error(self, error: Exception) -> None:
+        with self._error_lock:
+            if self.last_policy_error is None:
+                self.last_policy_error = error
+
+
+class _PinnedConnectProxyHandler(socketserver.BaseRequestHandler):
+    """Only permit HTTPS CONNECT; validate and pin each upstream TCP socket."""
+
+    def _reply(self, status: int, reason: str) -> None:
+        try:
+            self.request.sendall(
+                f"HTTP/1.1 {status} {reason}\r\n"
+                "Connection: close\r\nContent-Length: 0\r\n\r\n".encode("ascii")
+            )
+        except OSError:
+            pass
+
+    def handle(self) -> None:
+        client = self.request
+        client.settimeout(5.0)
+        header = bytearray()
+        try:
+            while b"\r\n\r\n" not in header and len(header) <= 16_384:
+                chunk = client.recv(4096)
+                if not chunk:
+                    return
+                header.extend(chunk)
+            if len(header) > 16_384 or b"\r\n\r\n" not in header:
+                self._reply(400, "Bad Request")
+                return
+
+            line = bytes(header).split(b"\r\n", 1)[0].decode("ascii", errors="replace")
+            parts = line.split()
+            if len(parts) != 3 or parts[0].upper() != "CONNECT":
+                self._reply(405, "HTTPS CONNECT Required")
+                return
+            authority = parts[1]
+            try:
+                parsed = urlparse("//" + authority)
+                host = (parsed.hostname or "").lower()
+                port = parsed.port or 443
+                if not host or parsed.username is not None or parsed.password is not None:
+                    raise ValueError("invalid CONNECT authority")
+                if not 1 <= port <= 65535:
+                    raise ValueError("invalid CONNECT port")
+            except ValueError:
+                self._reply(400, "Bad CONNECT Authority")
+                return
+
+            try:
+                target = self.server.resolver.resolve_and_validate(
+                    f"https://{host}:{port}/"
+                )
+            except (InvalidURL, SSRFBlocked, SearchError) as ex:
+                self.server.record_policy_error(ex)
+                log.warning(
+                    "playwright_proxy_destination_blocked",
+                    host=host[:100], port=port, error=str(ex)[:120],
+                )
+                self._reply(403, "Destination Blocked")
+                return
+
+            upstream = None
+            for ip in target.resolved_ips:
+                try:
+                    # Numeric IP only: the OS resolver is not called a second time.
+                    upstream = socket.create_connection((ip, port), timeout=5.0)
+                    self.server.last_connect_ips.append(ip)
+                    break
+                except OSError:
+                    continue
+            if upstream is None:
+                self._reply(502, "Upstream Unavailable")
+                return
+
+            with upstream:
+                client.settimeout(2.0)
+                upstream.settimeout(2.0)
+                client.sendall(
+                    b"HTTP/1.1 200 Connection Established\r\n"
+                    b"Proxy-Agent: web-search-pinned-proxy\r\n\r\n"
+                )
+                self._relay(client, upstream, host)
+        except (OSError, ValueError):
+            return
+
+    def _relay(self, client, upstream, host: str) -> None:
+        deadline = time.monotonic() + self.server.max_tunnel_seconds
+        transferred = 0
+        while time.monotonic() < deadline:
+            remaining = max(0.0, deadline - time.monotonic())
+            try:
+                readable, _, exceptional = select.select(
+                    [client, upstream], [], [client, upstream], min(1.0, remaining)
+                )
+            except (OSError, ValueError):
+                return
+            if exceptional:
+                return
+            for source in readable:
+                destination = upstream if source is client else client
+                try:
+                    data = source.recv(65_536)
+                    if not data:
+                        return
+                    transferred += len(data)
+                    if transferred > self.server.max_tunnel_bytes:
+                        return
+                    if not self.server.reserve_bytes(len(data), host):
+                        return
+                    destination.sendall(data)
+                except (OSError, TimeoutError):
+                    return
+
+
+class _PinnedConnectProxy:
+    """Lifecycle wrapper for the per-navigation HTTPS CONNECT proxy."""
+
+    def __init__(self, resolver: SafeURLResolver):
+        max_total = min(DEFAULT_MAX_CRAWL_BYTES, DEFAULT_MAX_HTML_BYTES * 2)
+        self.server = _PinnedConnectProxyServer(
+            ("127.0.0.1", 0), resolver,
+            max_tunnel_bytes=DEFAULT_MAX_RESPONSE_BYTES,
+            max_total_bytes=max_total,
+            max_tunnel_seconds=max(10.0, DEFAULT_MAX_BROWSER_TIME_S + 5.0),
+        )
+        host, port = self.server.server_address
+        self.url = f"http://{host}:{port}"
+        self._thread = threading.Thread(
+            target=self.server.serve_forever,
+            name="web-search-pinned-proxy",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def close(self) -> None:
+        try:
+            self.server.shutdown()
+        finally:
+            self.server.server_close()
+            if self._thread.is_alive():
+                self._thread.join(timeout=2.0)
+
+
 def _fetch_playwright(url: str, cookies_header: str = "") -> tuple[str | None, str]:
     """Headless browser with stealth patches — solves Cloudflare JS challenges.
 
@@ -3989,9 +4193,13 @@ def _fetch_playwright(url: str, cookies_header: str = "") -> tuple[str | None, s
     """
     from playwright.sync_api import sync_playwright  # hard dep
 
-    # Pre-launch validation — fail before opening a browser if the URL is bad.
+    # Validate before launch; the local proxy validates and pins again at
+    # the actual connection boundary, including every HTTPS sub-resource.
     resolver = get_safe_url_resolver()
-    resolver.resolve_and_validate(url)
+    initial = resolver.resolve_and_validate(url)
+    if initial.scheme != "https":
+        # The browser proxy supports HTTPS CONNECT only. HTTP remains on curl.
+        return None, ""
 
     def _block_ssrf(route) -> None:
         """page.route() handler — intercepts every browser request and aborts
@@ -4042,26 +4250,30 @@ def _fetch_playwright(url: str, cookies_header: str = "") -> tuple[str | None, s
             route.abort("blockedbyclient")
 
     browser = None
+    context = None
+    _persistent_ctx = False
+    proxy_guard = _PinnedConnectProxy(resolver)
+    proxy_guard.start()
+    proxy_settings = {"server": proxy_guard.url}
     try:
         with sync_playwright() as p:
-            # Persistent profile (login-walled hosts): one-time `host-login`
-            # created a real session; reuse it so the wall recognizes us.
+            # Persistent profile (login-walled hosts): one-time host-login
+            # created a real session; preserve that context's proxy policy.
             _prof = _profile_for(_host_of(url))
             if _prof is not None:
                 context = p.chromium.launch_persistent_context(
                     str(_prof),
                     headless=True,
                     viewport={"width": 1920, "height": 1080},
+                    proxy=proxy_settings,
                     args=[
                         "--disable-blink-features=AutomationControlled",
                         "--no-sandbox",
                         "--disable-dev-shm-usage",
                     ],
                 )
-                browser = context  # persistent context closes like a browser
                 _persistent_ctx = True
             else:
-                _persistent_ctx = False
                 browser = p.chromium.launch(
                     headless=True,
                     args=[
@@ -4070,15 +4282,16 @@ def _fetch_playwright(url: str, cookies_header: str = "") -> tuple[str | None, s
                         "--disable-dev-shm-usage",
                     ],
                 )
-            context = browser.new_context(
-                viewport={"width": 1920, "height": 1080},
-                user_agent=(
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    f"(KHTML, like Gecko) Chrome/{_CHROME_UA_MAJOR}.0.0.0 "
-                    f"Safari/537.36"
-                ),
-                locale="en-US",
-            )
+                context = browser.new_context(
+                    viewport={"width": 1920, "height": 1080},
+                    user_agent=(
+                        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                        f"Chrome/{_CHROME_UA_MAJOR}.0.0.0 "
+                        f"Safari/537.36"
+                    ),
+                    locale="en-US",
+                    proxy=proxy_settings,
+                )
             # Inject stealth patches before any page script runs
             context.add_init_script(_STEALTH_JS)
             page = context.new_page()
@@ -4189,15 +4402,21 @@ def _fetch_playwright(url: str, cookies_header: str = "") -> tuple[str | None, s
         # failures (F-08b). Propagate to the caller/cascade boundary.
         raise
     except Exception as ex:
+        if proxy_guard.server.last_policy_error is not None:
+            raise proxy_guard.server.last_policy_error
+        if proxy_guard.server.last_budget_error is not None:
+            raise proxy_guard.server.last_budget_error
         log.warning("playwright_failed", url=url[:60], error=str(ex)[:80])
     finally:
-        # F-11: always close the browser — a goto timeout previously leaked
-        # a live Chromium process per failure.
-        if browser is not None:
-            try:
+        # Close Chromium (or its persistent context) and the proxy on all paths.
+        try:
+            if _persistent_ctx and context is not None:
+                context.close()
+            elif browser is not None:
                 browser.close()
-            except Exception:
-                pass
+        except Exception:
+            pass
+        proxy_guard.close()
     return None, ""
 
 
