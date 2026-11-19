@@ -27,6 +27,7 @@ Two ways to use it:
 | Agentic research loop | Facet planning → multi-round retrieval → independent-domain coverage → targeted gap searches |
 | Diverse evidence | Sources ranked for relevance, configured authority tier, host diversity and lexical novelty |
 | Citation diagnostics | Quote grounding plus claim-level citation presence, valid-index and lexical-overlap checks |
+| Claim-level audit (opt-in) | `--verify-claims` assesses each cited factual claim and rejects evidence quotes absent from the cited source snapshot |
 | Smart model routing | A smaller model can handle planning and gap analysis; the main model synthesizes |
 | Keyless | No API keys for search. Local models are optional. |
 
@@ -85,7 +86,7 @@ query ─> research facets ─> search 8+ backends ─> extract pages
       ─> score evidence ─> independent-domain facet coverage
       ─> targeted gap searches ─> diverse source selection
       ─> synthesis (local Ollama / OpenAI-compatible endpoint)
-      ─> quote grounding + citation audit ─> one JSON research report
+      ─> quote grounding + citation audit ─> optional claim audit ─> one JSON research report
 ```
 
 The `pro` payload exposes the planned facets, per-facet independent-domain
@@ -98,6 +99,18 @@ field definitions and limitations.
 
 Historical benchmark records remain in `bench/`; live search results and
 provider latency vary, so those records are not current performance guarantees.
+
+Optional claim-level audit (one additional model call):
+
+```bash
+.venv/bin/python web_search.py pro "how do ETFs create and redeem shares" --use-llm --verify-claims
+```
+
+The JSON response includes `claim_audit[]` and `claim_audit_summary`. The
+audit checks whether each sentence-sized claim is supported by a verbatim span
+in a source cited by that claim. It is model-assisted entailment assessment,
+not formal proof or calibrated factual confidence; see
+[`docs/CLAIM_EVIDENCE_AUDIT.md`](docs/CLAIM_EVIDENCE_AUDIT.md).
 
 ## Configuration
 
