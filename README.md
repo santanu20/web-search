@@ -79,6 +79,13 @@ same CLI shown above — there is no second API to learn.
 | `deep-search` | Multi-round research loop |
 | `pro` | Deep research + LLM synthesis with inline `[n]` citations and quote grounding |
 
+Each Pro run also emits an explicit <code>research_plan</code> task graph:
+objective, facet retrieval, optional source deepening, synthesis and requested
+verification stages. Tasks expose dependencies, expected evidence, acceptance
+criteria, and budget allocation. The result annotates observed tasks as
+<code>complete</code>, <code>partial</code>, <code>blocked</code>, or
+<code>planned</code>. Planned work is never counted as completed research.
+
 ## How `pro` works
 
 ```
