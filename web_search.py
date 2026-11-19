@@ -4036,6 +4036,11 @@ class _PinnedConnectProxyServer(socketserver.ThreadingTCPServer):
             if self.last_policy_error is None:
                 self.last_policy_error = error
 
+    def record_budget_error(self, error: BudgetExceeded) -> None:
+        with self._error_lock:
+            if self.last_budget_error is None:
+                self.last_budget_error = error
+
 
 class _PinnedConnectProxyHandler(socketserver.BaseRequestHandler):
     """Only permit HTTPS CONNECT; validate and pin each upstream TCP socket."""
@@ -4139,6 +4144,14 @@ class _PinnedConnectProxyHandler(socketserver.BaseRequestHandler):
                         return
                     transferred += len(data)
                     if transferred > self.server.max_tunnel_bytes:
+                        self.server.record_budget_error(
+                            BudgetExceeded(
+                                "MAX_BROWSER_TUNNEL_BYTES",
+                                self.server.max_tunnel_bytes,
+                                transferred,
+                                f"https://{host}/",
+                            )
+                        )
                         return
                     if not self.server.reserve_bytes(len(data), host):
                         return
@@ -4179,12 +4192,12 @@ class _PinnedConnectProxy:
 
 
 def _fetch_playwright(url: str, cookies_header: str = "") -> tuple[str | None, str]:
-    """Headless browser with stealth patches — solves Cloudflare JS challenges.
+    """Headless browser with stealth patches and a pinned HTTPS tunnel proxy.
 
-    SSRF-safe: validates the URL before launch AND installs a page.route()
-    interceptor that aborts any sub-request (asset, XHR, iframe, JS-driven
-    redirect) whose resolved IP is forbidden. Defeats DNS rebinding inside
-    the browser context.
+    A local CONNECT proxy validates each hostname immediately before opening
+    its upstream socket and connects to a validated numeric IP. Playwright's
+    route interceptor remains as an additional early policy check. HTTP URLs
+    are left to the curl transport; browser egress is HTTPS CONNECT only.
 
     Injects stealth JS to hide automation signals (navigator.webdriver, etc).
     Captures cf_clearance cookies for reuse by curl_cffi on subsequent pages.
@@ -4328,6 +4341,12 @@ def _fetch_playwright(url: str, cookies_header: str = "") -> tuple[str | None, s
                 wait_until="domcontentloaded",
                 timeout=int(min(30, DEFAULT_MAX_BROWSER_TIME_S) * 1000),
             )
+            # A denied destination or exhausted tunnel budget is a real
+            # fetch-policy result, not a partially successful page.
+            if proxy_guard.server.last_policy_error is not None:
+                raise proxy_guard.server.last_policy_error
+            if proxy_guard.server.last_budget_error is not None:
+                raise proxy_guard.server.last_budget_error
             # Best-effort settle (2026-09-03): some hosts (S2) serve a JS
             # challenge at DOM-ready and render real content only after
             # the network quiets. Bounded 8s wait_for_load_state — skipped
