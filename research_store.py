@@ -253,6 +253,7 @@ class ResearchStore:
             "confidence_reason": payload.get("confidence_reason"),
             "coverage": payload.get("coverage"),
             "research_coverage": payload.get("research_coverage"),
+            "research_plan": payload.get("research_plan"),
             "source_intelligence": payload.get("source_intelligence"),
             "claim_audit_summary": payload.get("claim_audit_summary"),
             "n_results": payload.get("n_results"),
