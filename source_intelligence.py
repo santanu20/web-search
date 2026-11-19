@@ -239,6 +239,7 @@ def analyze_sources(
             uf.union(members[0], member)
 
     duplicate_pairs: list[dict[str, Any]] = []
+    duplicate_pair_keys: set[tuple[str, str]] = set()
     duplicate_neighbors: dict[str, set[str]] = defaultdict(set)
     for left, members in exact_hash_groups.items():
         if left and len(members) > 1:
@@ -246,7 +247,9 @@ def analyze_sources(
                 uf.union(members[0], member)
                 duplicate_neighbors[members[0]].add(member)
                 duplicate_neighbors[member].add(members[0])
-                duplicate_pairs.append({"source_a": members[0], "source_b": member, "similarity": 1.0, "method": "exact_content_hash"})
+                pair_key = tuple(sorted((members[0], member)))
+                duplicate_pair_keys.add(pair_key)
+                duplicate_pairs.append({"source_a": pair_key[0], "source_b": pair_key[1], "similarity": 1.0, "method": "exact_content_hash"})
 
     for i, left in enumerate(ids):
         left_shingles = shingles_by_id.get(left, set())
@@ -260,11 +263,15 @@ def analyze_sources(
                 continue
             similarity = _jaccard(left_shingles, right_shingles)
             if similarity >= near_duplicate_threshold:
+                pair_key = tuple(sorted((left, right)))
+                if pair_key in duplicate_pair_keys:
+                    continue
+                duplicate_pair_keys.add(pair_key)
                 uf.union(left, right)
                 duplicate_neighbors[left].add(right)
                 duplicate_neighbors[right].add(left)
                 duplicate_pairs.append({
-                    "source_a": left, "source_b": right,
+                    "source_a": pair_key[0], "source_b": pair_key[1],
                     "similarity": round(similarity, 3), "method": "near_duplicate_shingles",
                 })
 
