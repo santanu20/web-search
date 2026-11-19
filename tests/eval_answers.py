@@ -145,6 +145,11 @@ def evaluate_question(item: dict[str, object], args: argparse.Namespace) -> dict
             "n_citations": n_cites,
             "ungrounded": payload.get("ungrounded_citations"),
             "coverage": payload.get("coverage"),
+            "facet_coverage": payload.get("facet_coverage"),
+            "citation_coverage": (payload.get("citation_audit") or {}).get("citation_coverage"),
+            "uncited_claims": (payload.get("citation_audit") or {}).get("n_uncited_claims"),
+            "invalid_citations": (payload.get("citation_audit") or {}).get("n_invalid_citations"),
+            "unique_domains": (payload.get("meta") or {}).get("unique_domains"),
             "term_coverage": round(term_coverage(synthesis, expected), 2),
             "grounded_rate": None if gr_score is None else round(gr_score, 2),
             "chars": len(synthesis),
@@ -173,9 +178,26 @@ def verdict(rows: list[dict], min_success: float, min_grounded: float) -> dict:
         r["term_coverage"] for r in rows if isinstance(r.get("term_coverage"), float)
     ]
     agg_cov = sum(covs) / len(covs) if covs else 0.0
+    facet_covs = [
+        r["facet_coverage"] for r in rows
+        if isinstance(r.get("facet_coverage"), (int, float))
+    ]
+    citation_covs = [
+        r["citation_coverage"] for r in rows
+        if isinstance(r.get("citation_coverage"), (int, float))
+    ]
+    uncited_claims = sum(int(r.get("uncited_claims") or 0) for r in rows)
+    invalid_citations = sum(int(r.get("invalid_citations") or 0) for r in rows)
+    domain_counts = [
+        r["unique_domains"] for r in rows
+        if isinstance(r.get("unique_domains"), (int, float))
+    ]
     lats = [
         r["latency_s"] for r in rows if isinstance(r.get("latency_s"), (int, float))
     ]
+    sorted_lats = sorted(lats)
+    p50 = round(statistics.median(sorted_lats), 1) if sorted_lats else None
+    p95 = round(sorted_lats[min(len(sorted_lats) - 1, int(0.95 * (len(sorted_lats) - 1)))], 1) if sorted_lats else None
     lat_std = round(statistics.pstdev(lats), 1) if len(lats) > 1 else 0.0
     gr_std = round(statistics.pstdev(grs), 2) if len(grs) > 1 else 0.0
     passed = success_rate >= min_success and (
@@ -186,7 +208,14 @@ def verdict(rows: list[dict], min_success: float, min_grounded: float) -> dict:
         "grounded_rate_agg": None if agg_grounded is None else round(agg_grounded, 2),
         "grounded_rate_std": gr_std,
         "term_coverage_agg": round(agg_cov, 2),
+        "facet_coverage_agg": round(sum(facet_covs) / len(facet_covs), 2) if facet_covs else None,
+        "citation_coverage_agg": round(sum(citation_covs) / len(citation_covs), 2) if citation_covs else None,
+        "uncited_claims_total": uncited_claims,
+        "invalid_citations_total": invalid_citations,
+        "unique_domains_mean": round(sum(domain_counts) / len(domain_counts), 1) if domain_counts else None,
         "latency_s_mean": round(sum(lats) / len(lats), 1) if lats else None,
+        "latency_s_p50": p50,
+        "latency_s_p95": p95,
         "latency_s_std": lat_std,
         "thresholds": {"min_success": min_success, "min_grounded": min_grounded},
         "passed": passed,
@@ -266,6 +295,11 @@ def main(argv: list[str] | None = None) -> int:
                         "ok": row.get("ok", False),
                         "grounded_rate": row.get("grounded_rate"),
                         "term_coverage": row.get("term_coverage"),
+                        "facet_coverage": row.get("facet_coverage"),
+                        "citation_coverage": row.get("citation_coverage"),
+                        "uncited_claims": row.get("uncited_claims"),
+                        "invalid_citations": row.get("invalid_citations"),
+                        "unique_domains": row.get("unique_domains"),
                         "n_sources": row.get("n_sources"),
                         "error": row.get("error"),
                     },
