@@ -191,6 +191,92 @@ def extract_claims(
     return claims
 
 
+
+_COUNTER_STOPWORDS = frozenset({
+    "the", "and", "for", "with", "from", "that", "this", "are", "was", "were",
+    "has", "have", "had", "will", "would", "could", "should", "into", "over",
+    "under", "after", "before", "during", "than", "then", "their", "they",
+    "them", "its", "his", "her", "our", "your", "about", "between", "because",
+    "which", "what", "when", "where", "who", "how", "why", "not", "but",
+})
+
+
+def plan_counter_queries(
+    claims: list[ResearchClaim], *, max_claims: int = 8
+) -> list[dict[str, str]]:
+    """Create bounded, claim-specific searches for independent contrary evidence."""
+    planned: list[dict[str, str]] = []
+    for claim in claims:
+        if not claim.cited_source_ids:
+            continue
+        text = re.sub(r"\\s+", " ", claim.text).strip()
+        if len(text) < 15:
+            continue
+        planned.append({
+            "claim_id": claim.claim_id,
+            "query": f'"{text[:190]}" (criticism OR limitations OR disputed OR contrary evidence)',
+            "intent": "challenge_claim",
+        })
+        if len(planned) >= max(1, max_claims):
+            break
+    return planned
+
+
+def assign_counter_evidence(
+    claims: list[ResearchClaim],
+    counter_sources: list[EvidenceSource],
+    *,
+    max_per_claim: int = 3,
+    min_overlap: int = 2,
+) -> dict[str, list[str]]:
+    """Attach relevant new-publisher sources to claims using conservative lexical overlap.
+
+    This is a candidate selector, not an entailment classifier. The LLM audit
+    must still classify the evidence and the server validates every quote.
+    Sources on the same host as an original citation are excluded so that a
+    crawl sibling is not presented as independent counter-evidence.
+    """
+    assignments: dict[str, list[str]] = {}
+    for claim in claims:
+        claim_terms = {
+            token for token in re.findall(r"[a-z0-9][a-z0-9'-]{2,}", normalize_text(claim.text))
+            if token not in _COUNTER_STOPWORDS
+        }
+        cited_hosts = {
+            urlsplit(source.url).hostname or ""
+            for source in counter_sources
+            if source.source_id in claim.cited_source_ids
+        }
+        candidates: list[tuple[float, str, str]] = []
+        for source in counter_sources:
+            if not source.content or source.source_id in claim.cited_source_ids:
+                continue
+            host = urlsplit(source.url).hostname or source.host
+            if host in cited_hosts:
+                continue
+            content_terms = {
+                token for token in re.findall(r"[a-z0-9][a-z0-9'-]{2,}", normalize_text(source.content))
+                if token not in _COUNTER_STOPWORDS
+            }
+            overlap = len(claim_terms & content_terms)
+            if overlap < min_overlap:
+                continue
+            score = overlap / max(1.0, len(claim_terms) ** 0.5)
+            candidates.append((score, host, source.source_id))
+        candidates.sort(reverse=True)
+        selected: list[str] = []
+        seen_hosts: set[str] = set()
+        for _score, host, source_id in candidates:
+            if host in seen_hosts:
+                continue
+            selected.append(source_id)
+            seen_hosts.add(host)
+            if len(selected) >= max(1, max_per_claim):
+                break
+        assignments[claim.claim_id] = selected
+    return assignments
+
+
 def select_evidence_window(content: str, query: str, max_chars: int = 4000) -> str:
     """Select a high-overlap paragraph neighborhood for bounded verifier context."""
     if len(content) <= max_chars:
