@@ -3029,6 +3029,19 @@ def _drop_below_content_floor(
     return kept
 
 
+def _floor_relevance_filter(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """WS3 follow-up: the resilience floor must not serve keyword-adjacent junk.
+
+    MediaWiki's search returns its top keyword matches for ANY query — under
+    an all-backend outage that means "Sovereign citizen movement" for a
+    speculative-decoding query. Keep only results the F-60 coverage-weighted
+    scorer connects to the query (relevance_score >= 1, i.e. at least ~2
+    matched terms on a typical query). An honest empty beats authoritative-
+    looking garbage the agent cannot distinguish from real hits.
+    """
+    return [r for r in results if r.get("relevance_score", 0) >= 1]
+
+
 def _wikipedia_api_search(
     query: str, *, max_results: int = 8, timeout: float = 5.0
 ) -> list[dict[str, Any]]:
@@ -3170,6 +3183,14 @@ def _do_search(
     attempts, backends_tried = [], []
     last_err = None
     was_rate_limited = was_timed_out = False
+    # Correlated-empty detection: engines under rate pressure soft-block by
+    # serving an EMPTY result page instead of a 429, so ddgs raises
+    # "No results found" for queries that plainly have results. One empty is
+    # ambiguity; two-plus across different backends in one query is the
+    # engine-side soft-block signature.
+    n_empty_results = 0
+    soft_block_paced = False
+    suspected_soft_block = False
 
     # WS4: recency-intent auto timelimit — visible in the echoed params and
     # logged; never overrides an explicit user --timelimit.
@@ -3321,6 +3342,7 @@ def _do_search(
             cb.record_failure(f"{category}:{cur_backend}")
             last_err = f"DDGSException: {ex}"
             if is_empty:
+                n_empty_results += 1
                 log.info(
                     "no_results_backend",
                     category=category,
@@ -3328,6 +3350,25 @@ def _do_search(
                     backend=cur_backend,
                     attempt=attempt_idx,
                 )
+                # Second-plus empty backend: treat as suspected soft-block.
+                # Pace the rotation (the 429/timeout handlers already sleep;
+                # the empty-result path previously hammered the next backend
+                # instantly) and halve the global AIMD rate once per query.
+                if n_empty_results >= 2 and attempt_idx < retries_cap:
+                    if not soft_block_paced:
+                        soft_block_paced = True
+                        limiter.on_rate_limit()
+                    slept = _backoff_sleep(attempt_idx)
+                    metrics.incr("retries")
+                    log.warning(
+                        "suspected_soft_block_backoff",
+                        category=category,
+                        query=query,
+                        n_empty_backends=n_empty_results,
+                        attempt=attempt_idx,
+                        sleep_s=round(slept, 2),
+                        new_rate=round(limiter.rate, 2),
+                    )
             else:
                 log.error(
                     "ddgs_error",
@@ -3346,6 +3387,12 @@ def _do_search(
             if attempt_idx < retries_cap:
                 continue
             break
+
+    # All attempts failed AND every failure was an empty-result raise: far
+    # more likely an engine-side soft-block than every index on the internet
+    # jointly having zero hits for this query. Surfaced in meta + the final
+    # error so callers retry instead of trusting the floor or giving up.
+    suspected_soft_block = bool(attempts) and n_empty_results == len(attempts)
 
     if cached is not None and status == "stale":
         cached["meta"].update(
@@ -3374,6 +3421,15 @@ def _do_search(
                     query=query,
                 )
             )
+            n_unfiltered = len(results)
+            results = _floor_relevance_filter(results)
+            if len(results) < n_unfiltered:
+                log.warning(
+                    "wikipedia_floor_relevance_filtered",
+                    query=query[:60],
+                    kept=len(results),
+                    dropped=n_unfiltered - len(results),
+                )
             if results:
                 payload = {
                     "schema": OUTPUT_SCHEMA_VERSION,
@@ -3390,6 +3446,7 @@ def _do_search(
                         "cache_status": "miss",
                         "served_from": "live",
                         "emergency_backend": "wikipedia-api",
+                        "suspected_soft_block": suspected_soft_block,
                         "attempts": attempts,
                         "backends_tried": backends_tried,
                         "rate_limited": was_rate_limited,
@@ -3406,6 +3463,13 @@ def _do_search(
 
     # Translate the vendor exception to a vendor-agnostic SearchError so
     # callers never need to know about DDGS.
+    if suspected_soft_block:
+        raise BackendUnavailable(
+            f"All {len(attempts)} attempts returned 'No results found' for "
+            f"{category!r} {query!r} — suspected engine soft-block (empty "
+            f"page instead of 429). Retry after ~60s, lower batch "
+            f"concurrency, or try WEB_SEARCH_BACKEND=<single-backend>."
+        )
     raise BackendUnavailable(
         f"All {len(attempts)} attempts failed for {category!r} {query!r}. Last: {last_err}"
     )
@@ -6206,31 +6270,37 @@ def _crawl_adaptive(
         # accept_downloads (2026-09-03): journal PDF-galley URLs trigger
         # Playwright 'Download is starting' -> hard crawl error when
         # downloads are refused. Accept, discard the binaries.
+        import shutil
         import tempfile as _tf_dl
 
         _dl_dir = _tf_dl.mkdtemp(prefix="ws_crawl_dl_")
+        try:
+            _bc = BrowserConfig(
+                accept_downloads=True, downloads_path=_dl_dir, headless=True
+            )
+            async with AsyncWebCrawler(
+                config=_bc, logger=AsyncLogger(verbose=False)
+            ) as crawler:
+                adaptive = AdaptiveCrawler(crawler)
+                await adaptive.digest(start_url=start_url, query=query)
+                confidence = float(adaptive.confidence)
+                relevant = adaptive.get_relevant_content(top_k=max_pages)
+                if kb_export_path:
+                    # Suppress crawl4ai's "Exported N documents..." stdout (would pollute JSON)
+                    import contextlib
+                    import io
 
-        _bc = BrowserConfig(
-            accept_downloads=True, downloads_path=_dl_dir, headless=True
-        )
-        async with AsyncWebCrawler(
-            config=_bc, logger=AsyncLogger(verbose=False)
-        ) as crawler:
-            adaptive = AdaptiveCrawler(crawler)
-            await adaptive.digest(start_url=start_url, query=query)
-            confidence = float(adaptive.confidence)
-            relevant = adaptive.get_relevant_content(top_k=max_pages)
-            if kb_export_path:
-                # Suppress crawl4ai's "Exported N documents..." stdout (would pollute JSON)
-                import contextlib
-                import io
-
-                with contextlib.redirect_stdout(io.StringIO()):
-                    try:
-                        adaptive.export_knowledge_base(kb_export_path)
-                    except Exception as ex:
-                        log.debug("kb_export_failed", error=str(ex)[:80])
-            return confidence, list(relevant)
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        try:
+                            adaptive.export_knowledge_base(kb_export_path)
+                        except Exception as ex:
+                            log.debug("kb_export_failed", error=str(ex)[:80])
+                return confidence, list(relevant)
+        finally:
+            # Download scratch is discard-by-design (binaries never leave
+            # this call) — reclaimed here so repeated adaptive crawls
+            # cannot accumulate ws_crawl_dl_ dirs.
+            shutil.rmtree(_dl_dir, ignore_errors=True)
 
     try:
         confidence, relevant = asyncio.run(_run())
@@ -9560,6 +9630,35 @@ def _self_check() -> int:
     sorted_norm = _apply_sort(norm, "latest")
     if not sorted_norm or sorted_norm[0].get("rank") != 1:
         failures.append(f"rank not assigned via _apply_sort: {sorted_norm}")
+
+    # WS3 floor relevance filter — pin the garbage-floor failure mode: under
+    # an all-backend soft-block, MediaWiki keyword search once served
+    # "Sovereign citizen movement" for a speculative-decoding query. The
+    # floor must keep only results the F-60 scorer connects to the query.
+    spec_query_terms = {
+        t for t in "speculative decoding 2026 new methods survey".split() if len(t) > 2
+    }
+    garbage = _score_relevance(
+        {"title": "Sovereign citizen movement", "body": "pseudolegal movement"},
+        spec_query_terms,
+    )
+    on_topic = _score_relevance(
+        {"title": "Speculative decoding", "body": "draft model verification methods"},
+        spec_query_terms,
+    )
+    if garbage != 0:
+        failures.append(f"floor filter: garbage scored {garbage}, expected 0")
+    if on_topic < 1:
+        failures.append(f"floor filter: on-topic scored {on_topic}, expected >=1")
+    kept = _floor_relevance_filter(
+        [
+            {"title": "garbage", "relevance_score": garbage},
+            {"title": "on-topic", "relevance_score": on_topic},
+            {"title": "no-score-field"},
+        ]
+    )
+    if [k["title"] for k in kept] != ["on-topic"]:
+        failures.append(f"floor relevance filter kept wrong results: {kept}")
 
     # adaptive bucket AIMD
     atb = AdaptiveTokenBucket(2.0, 5, 10.0, 0.2, 0.2, 0.5)
